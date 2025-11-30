@@ -1,0 +1,1224 @@
+<!--
+    schedule_edit.html — редактирование школьного расписания (админ).
+
+    В будущем задействуются CGI:
+      • GET  /cgi-bin/profile.cgi            → роль + ФИО пользователя.
+      • GET  /cgi-bin/refs.cgi?type=...      → классы, предметы, учителя, кабинеты и связи.
+      • GET  /cgi-bin/schedule_edit_data.cgi → текущее расписание для редактирования.
+      • POST /cgi-bin/save_schedule.cgi      → сохранить изменения (JSON).
+	  
+	  НЕ доверять данным с клиента, всё валидировать и заново проверять конфликты
+	  
+	  
+1) /cgi-bin/profile.cgi (GET)
+   • вернуть JSON: { user_id, role, role_code, fio }
+   • данные брать из сессии (кто вошёл).
+
+2) /cgi-bin/refs.cgi (GET)
+   Поддерживаемые type:
+     classes  → ["5А","5Б",...]
+     subjects → ["Математика",...]
+     teachers → ["Иванов И.И.",...]
+     rooms    → ["203","305",...]
+     teachers_by_subject →
+         { "Математика": ["Иванов","Сидорова"], ... }
+
+3) /cgi-bin/schedule_edit_data.cgi (GET)
+   • вернуть: { lessons:[ { id,day,lesson_num,class_name,subject,teacher,room } ] }
+
+4) /cgi-bin/save_schedule.cgi (POST, JSON)
+   фронт отправляет: lessons:[ {...}, ... ]  (id=0 → новый)
+   сервер обязан:
+     • проверить валидность
+     • проверить конфликты (class/teacher/room в одно время)
+     • INSERT (id=0), UPDATE (id>0), DELETE (если отсутствует в списке)
+   ответ: { ok:true } или { ok:false, message }
+
+-->
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Редактирование расписания — Администратор</title>
+
+    <style>
+		/* Общие стили страницы */
+		body {
+			margin: 0;
+			padding: 0;
+			background: #e8e4f2;
+			font-family: Arial, sans-serif;
+		}
+
+		/* Центральный контейнер всей страницы (карточка) */
+		.page-container {
+			max-width: 1100px;
+			margin: 20px auto;
+			background: #ffffffcc;
+			border-radius: 14px;
+			box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+			padding-bottom: 20px;
+			overflow: hidden;
+		}
+
+		/* Верхняя панель (цветная полоска с названием и ФИО) */
+		.topbar {
+			background: #cc10cc;
+			padding: 10px 12px;
+			color: white;
+			display: flex;
+			align-items: center;
+			justify-content: flex-start;
+			box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+			border-radius: 14px 14px 0 0;
+		}
+
+		/* Левая часть верхней панели */
+		.topbar-left {
+			display: flex;
+			flex-direction: column;
+			align-items: flex-start;
+		}
+
+		/* Заголовок в топбаре */
+		.topbar-title {
+			font-size: 18px;
+			font-weight: bold;
+		}
+
+		/* Строка "Роль, Пользователь" */
+		.topbar-user {
+			font-size: 14px;
+		}
+
+		.topbar-user span {
+			font-weight: bold;
+		}
+
+		/* Основной контент */
+		.content {
+			padding: 20px 24px 30px 24px;
+		}
+
+		/* Заголовок панели */
+		.panel-title {
+			font-size: 20px;
+			margin-bottom: 10px;
+			color: #660066;
+			font-weight: bold;
+		}
+
+		/* Контейнер кнопок над таблицей */
+		.controls {
+			margin-bottom: 16px;
+		}
+
+		.controls button {
+			margin-right: 10px;
+		}
+
+		/* Основная фиолетовая кнопка */
+		.btn-primary {
+			padding: 8px 16px;
+			background: #cc10cc;
+			color: #ffffff;
+			border: none;
+			border-radius: 8px;
+			font-size: 14px;
+			cursor: pointer;
+		}
+
+		.btn-primary:hover {
+			background: #770f77;
+		}
+
+		/* Второстепенная белая кнопка */
+		.btn-secondary {
+			padding: 8px 16px;
+			background: #ffffff;
+			color: #cc10cc;
+			border: 1px solid #cc10cc;
+			border-radius: 8px;
+			font-size: 14px;
+			cursor: pointer;
+		}
+
+		.btn-secondary:hover {
+			background: #f7e3f7;
+		}
+
+		/* Красная кнопка (удаление) */
+		.btn-danger {
+			padding: 8px 16px;
+			background: #ff4d4d;
+			color: #ffffff;
+			border: none;
+			border-radius: 8px;
+			font-size: 14px;
+			cursor: pointer;
+		}
+
+		.btn-danger:hover {
+			background: #cc0000;
+		}
+
+		/* Состояние кнопки "отключена" */
+		.btn-disabled {
+			opacity: 0.6;
+			cursor: default;
+		}
+
+		/* Обёртка таблицы */
+		.schedule-wrapper {
+			overflow-x: auto;
+		}
+
+		/* Таблица */
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			background: #ffffff;
+			box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+			font-size: 13px;
+		}
+
+		th {
+			background: #cc10cc;
+			color: white;
+			padding: 8px;
+		}
+
+		td {
+			padding: 6px;
+			border: 1px solid #ddd;
+			vertical-align: top;
+		}
+
+		/* Отдельные колонки */
+		.day-col {
+			width: 110px;
+			font-weight: bold;
+			color: #660066;
+		}
+
+		.lesson-col {
+			width: 70px;
+			font-weight: bold;
+		}
+
+		.class-col {
+			width: 80px;
+			font-weight: bold;
+		}
+
+		/* Подсветка выбранной строки */
+		.selected-row td {
+			background: #ffe5ff;
+		}
+
+		.selected-row .day-col,
+		.selected-row .lesson-col {
+			background: #ffffff;
+		}
+
+		/* Ошибка в поле формы */
+		.field-error {
+			border: 2px solid #ff4d4d !important;
+		}
+
+		/* Фон модального окна */
+		.modal-backdrop {
+			position: fixed;
+			inset: 0;
+			background: rgba(0,0,0,0.4);
+			display: none;
+			justify-content: center;
+			align-items: center;
+			z-index: 1000;
+		}
+
+		/* Модальное окно */
+		.modal {
+			background: #ffffff;
+			padding: 20px 24px;
+			border-radius: 12px;
+			box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+			width: 400px;
+			max-width: 95%;
+		}
+
+		/* Заголовок модалки */
+		.modal-title {
+			font-size: 18px;
+			font-weight: bold;
+			margin-bottom: 12px;
+			color: #660066;
+		}
+
+		/* Строки полей формы */
+		.modal-row {
+			margin-bottom: 10px;
+		}
+
+		.modal-row label {
+			display: block;
+			font-size: 14px;
+			margin-bottom: 4px;
+		}
+
+		.modal-row select {
+			width: 100%;
+			padding: 6px;
+			border-radius: 6px;
+			border: 1px solid #bbb;
+			font-size: 14px;
+		}
+
+		/* Кнопки модалки */
+		.modal-buttons {
+			margin-top: 14px;
+			text-align: right;
+		}
+
+		/* Текст ошибки в модалке */
+		.modal-error {
+			margin-top: 6px;
+			font-size: 13px;
+			color: #cc0000;
+			min-height: 18px;
+		}
+
+		/* Нижняя панель с кнопками */
+		.footer-buttons {
+			margin-top: 16px;
+			display: flex;
+			justify-content: flex-end;
+			gap: 10px;
+		}
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <!-- Верхняя фиолетовая панель -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Редактирование расписания
+            </div>
+            <!-- Блок с ролью и ФИО пользователя.
+                 Значения будут подставлены динамически из profile.cgi. -->
+            <div class="topbar-user">
+                Роль: <span id="user-role">Администратор</span>,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="content">
+        <div class="panel-title">Редактирование расписания</div>
+
+        <div class="controls">
+            <button class="btn-primary" id="btn-add">Добавить урок</button>
+            <button class="btn-secondary btn-disabled" id="btn-edit-row" disabled>
+                Изменить выбранный
+            </button>
+            <button class="btn-danger btn-disabled" id="btn-delete-row" disabled>
+                Удалить выбранный
+            </button>
+        </div>
+
+        <div class="schedule-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>День</th>
+                        <th>№ урока</th>
+                        <th>Класс</th>
+                        <th>Предмет</th>
+                        <th>Учитель</th>
+                        <th>Кабинет</th>
+                    </tr>
+                </thead>
+                <tbody id="schedule-body">
+                    <!--Тело таблицы (строки с уроками). JS-код будет здесь динамически создавать <tr> и <td> для каждого урока. -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="footer-buttons">
+            <button class="btn-secondary" id="btn-cancel-changes">Отменить изменения</button>
+            <button class="btn-primary" id="btn-save">Сохранить</button>
+            <button class="btn-secondary" id="btn-exit-edit">Выйти</button>
+        </div>
+    </div>
+
+</div>
+
+<!-- Модальное окно для добавления/редактирования урока.-->
+<div class="modal-backdrop" id="lesson-modal-backdrop">
+    <div class="modal">
+        <div class="modal-title" id="lesson-modal-title">Добавление урока</div>
+
+        <div class="modal-row">
+            <label for="modal-day">День недели</label>
+            <select id="modal-day">
+                <option value="">-- выберите день --</option>
+                <option value="1">Понедельник</option>
+                <option value="2">Вторник</option>
+                <option value="3">Среда</option>
+                <option value="4">Четверг</option>
+                <option value="5">Пятница</option>
+                <option value="6">Суббота</option>
+            </select>
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-lesson-num">Номер урока</label>
+            <select id="modal-lesson-num">
+                <option value="">-- выберите урок --</option>
+                <option value="1">1 урок</option>
+                <option value="2">2 урок</option>
+                <option value="3">3 урок</option>
+                <option value="4">4 урок</option>
+                <option value="5">5 урок</option>
+                <option value="6">6 урок</option>
+                <option value="7">7 урок</option>
+            </select>
+        </div>
+
+
+        <div class="modal-row">
+            <label for="modal-class">Класс</label>
+            <select id="modal-class">
+                <!-- Список классов подставим из справочника (refs.cgi/заглушка) -->
+            </select>
+        </div>
+
+
+        <div class="modal-row">
+            <label for="modal-subject">Предмет</label>
+            <select id="modal-subject">
+                <!-- Список предметов подставим из справочника (refs.cgi/заглушка) -->
+            </select>
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-teacher">Учитель</label>
+            <select id="modal-teacher">
+                <!--
+                    сюда подставляем учителей в зависимости от выбранного предмета.
+                    Логика в JS: getTeachersForSubject(subject) → fillSelectOptions(...).
+                -->
+            </select>
+        </div>
+
+
+        <div class="modal-row">
+            <label for="modal-room">Кабинет</label>
+            <select id="modal-room">
+                <!-- Список кабинетов подставим из справочника (refs.cgi/заглушка) -->
+            </select>
+        </div>
+
+        <!-- Здесь показываем текст ошибки  -->
+        <div class="modal-error" id="modal-error"></div>
+
+        <div class="modal-buttons">
+            <button class="btn-secondary" id="modal-btn-cancel">Отмена</button>
+            <button class="btn-primary" id="modal-btn-ok">ОК</button>
+        </div>
+    </div>
+</div>
+
+<script>
+
+    // Массив всех уроков, которые видит/редактирует пользователь
+    let allLessons = [];
+
+    // Последняя "зафиксированная" версия расписания (после загрузки или после успешного сохранения)
+    let savedLessons = [];
+
+    // ID выбранного урока в таблице (если ничего не выбрано — null)
+    let selectedLessonId = null;
+
+    // Временный ID для новых уроков (отрицательные значения)
+    // Пока запись не сохранена на сервере, у неё id < 0.
+    // После сохранения сервер вернёт реальный id > 0 (уже на следующей загрузке).
+    let nextTempId = -1;
+
+
+    // интерфейс будет работать на этих "тестовых" данных.
+    const defaultRefClasses  = ["5А", "5Б", "6А", "7В"];
+    const defaultRefSubjects = ["Математика", "Русский язык", "Информатика", "История"];
+    const defaultRefTeachers = ["Иванов И.И.", "Петров П.П.", "Сидорова А.А."];
+    const defaultRefRooms    = ["101", "203", "305", "каб. информатики"];
+
+    // ЗАГЛУШКА
+    const defaultRefTeachersBySubject = {
+        "Математика": ["Иванов И.И."],
+        "Русский язык": ["Петров П.П."],
+        "Информатика": ["Сидорова А.А."],
+        "История": ["Иванов И.И.", "Петров П.П."]
+    };
+
+    // Рабочие массивы справочников (сюда будут загружены данные из CGI или останутся заглушки)
+    let refClasses  = [...defaultRefClasses];
+    let refSubjects = [...defaultRefSubjects];
+    let refTeachers = [...defaultRefTeachers];
+    let refRooms    = [...defaultRefRooms];
+
+
+    let refTeachersBySubject = { ...defaultRefTeachersBySubject };
+
+
+    function loadRefs() {
+        //  Загружаем список классов
+        fetch("/cgi-bin/refs.cgi?type=classes")
+            .then(res => res.json())
+            .then(data => {
+                // Если сервер вернул массив — подменяем refClasses
+                if (Array.isArray(data)) refClasses = data;
+            })
+            .catch(() => {
+                // оставляем заглушку defaultRefClasses
+                refClasses = [...defaultRefClasses];
+            });
+
+        //  Загружаем список предметов
+        fetch("/cgi-bin/refs.cgi?type=subjects")
+            .then(res => res.json())
+            .then(data => {
+                if (Array.isArray(data)) refSubjects = data;
+            })
+            .catch(() => {
+                refSubjects = [...defaultRefSubjects];
+            });
+
+        // Загружаем общий список учителей 
+        fetch("/cgi-bin/refs.cgi?type=teachers")
+            .then(res => res.json())
+            .then(data => {
+                if (Array.isArray(data)) refTeachers = data;
+            })
+            .catch(() => {
+                refTeachers = [...defaultRefTeachers];
+            });
+
+        // Загружаем список кабинетов
+        fetch("/cgi-bin/refs.cgi?type=rooms")
+            .then(res => res.json())
+            .then(data => {
+                if (Array.isArray(data)) refRooms = data;
+            })
+            .catch(() => {
+                refRooms = [...defaultRefRooms];
+            });
+
+        // загружаем связи "предмет → список учителей"
+        fetch("/cgi-bin/refs.cgi?type=teachers_by_subject")
+            .then(res => res.json())
+            .then(data => {
+                // Проверяем, что пришёл объект 
+                if (data && typeof data === "object" && !Array.isArray(data)) {
+                    refTeachersBySubject = data;
+                }
+            })
+            .catch(() => {
+                // Заглушка
+                refTeachersBySubject = { ...defaultRefTeachersBySubject };
+            });
+    }
+
+
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                // Ожидаем, что вернёт { role: "...", fio: "..." }
+                document.getElementById("user-role").textContent = data.role;
+                document.getElementById("user-fio").textContent = data.fio;
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                document.getElementById("user-role").textContent = "Администратор";
+                document.getElementById("user-fio").textContent  = "Иванова Анна Алексеевна (тест)";
+            });
+    }
+
+    /* schedule_edit_data.cgi)*/
+    function loadSchedule() {
+        fetch("/cgi-bin/schedule_edit_data.cgi")
+            .then(res => res.json())
+            .then(data => {
+                // Ожидаем формат: { lessons: [ {...}, {...} ] }
+                allLessons = (data.lessons || []).map(l => ({
+                    id: l.id,
+                    day: Number(l.day),
+                    lesson_num: Number(l.lesson_num),
+                    class_name: l.class_name,
+                    subject: l.subject,
+                    teacher: l.teacher,
+                    room: l.room
+                }));
+
+                // Делаем глубокую копию в savedLessons (для кнопки "Отменить изменения")
+                savedLessons = JSON.parse(JSON.stringify(allLessons));
+
+                // Отрисовываем таблицу 
+                renderScheduleTable();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                allLessons = [
+                    {
+                        id: 1,
+                        day: 1,
+                        lesson_num: 1,
+                        class_name: "5А",
+                        subject: "Математика",
+                        teacher: "Иванов И.И.",
+                        room: "203"
+                    },
+                    {
+                        id: 2,
+                        day: 1,
+                        lesson_num: 1,
+                        class_name: "5Б",
+                        subject: "Русский язык",
+                        teacher: "Петров П.П.",
+                        room: "205"
+                    }
+                ];
+
+                savedLessons = JSON.parse(JSON.stringify(allLessons));
+                renderScheduleTable();
+            });
+    }
+
+    /*дни недели->текст*/
+    function dayToText(day) {
+        switch (day) {
+            case 1: return "Понедельник";
+            case 2: return "Вторник";
+            case 3: return "Среда";
+            case 4: return "Четверг";
+            case 5: return "Пятница";
+            case 6: return "Суббота";
+            default: return "";
+        }
+    }
+
+    /*отрисовка расписания из allLessons*/
+    function renderScheduleTable() {
+        const tbody = document.getElementById("schedule-body");
+        tbody.innerHTML = "";
+
+        // Создаём отсортированную копию массива уроков:
+        // сначала по дню, затем по номеру урока, затем по названию класса
+        const sorted = [...allLessons].sort((a, b) => {
+            if (a.day !== b.day)           return a.day - b.day;
+            if (a.lesson_num !== b.lesson_num) return a.lesson_num - b.lesson_num;
+            return a.class_name.localeCompare(b.class_name, "ru");
+        });
+
+        // Перебираем отсортированный массив группами (день, номер урока)
+        let i = 0;
+        while (i < sorted.length) {
+            const groupDay = sorted[i].day;          
+            const groupLesson = sorted[i].lesson_num; 
+
+            // Находим диапазон [i, j), где совпадают day и lesson_num
+            let j = i;
+            while (j < sorted.length &&
+                   sorted[j].day === groupDay &&
+                   sorted[j].lesson_num === groupLesson) {
+                j++;
+            }
+
+            // Сколько строк входит в группу (для rowSpan у дня и номера урока)
+            const rowspan = j - i;
+
+            // Проходим по строкам внутри группы
+            for (let k = i; k < j; k++) {
+                const lesson = sorted[k];
+
+                // Создаём HTML-строку таблицы
+                const tr = document.createElement("tr");
+                // Запоминаем id урока в data-атрибуте строки (для выбора)
+                tr.dataset.id = lesson.id;
+
+                // Если эта строка выбранная, подсветим её
+                if (lesson.id === selectedLessonId) {
+                    tr.classList.add("selected-row");
+                }
+
+                // Для первой строки группы в таблицу добавляем ячейки "День" и "№ урока" с rowSpan
+                if (k === i) {
+                    const tdDay = document.createElement("td");
+                    tdDay.className = "day-col";
+                    tdDay.rowSpan = rowspan;
+                    tdDay.textContent = dayToText(lesson.day);
+                    tr.appendChild(tdDay);
+
+                    const tdLessonNum = document.createElement("td");
+                    tdLessonNum.className = "lesson-col";
+                    tdLessonNum.rowSpan = rowspan;
+                    tdLessonNum.textContent = lesson.lesson_num;
+                    tr.appendChild(tdLessonNum);
+                }
+
+                // Ячейка Класс
+                const tdClass = document.createElement("td");
+                tdClass.className = "class-col";
+                tdClass.textContent = lesson.class_name;
+                tr.appendChild(tdClass);
+
+                // Ячейка Предмет
+                const tdSubject = document.createElement("td");
+                tdSubject.textContent = lesson.subject;
+                tr.appendChild(tdSubject);
+
+                // Ячейка Учитель
+                const tdTeacher = document.createElement("td");
+                tdTeacher.textContent = lesson.teacher;
+                tr.appendChild(tdTeacher);
+
+                // Ячейка Кабинет
+                const tdRoom = document.createElement("td");
+                tdRoom.textContent = lesson.room;
+                tr.appendChild(tdRoom);
+
+                // при нажатии — запоминаем выбранный lesson.id и обновляем подсветку/кнопки.
+                tr.addEventListener("click", () => {
+                    selectedLessonId = lesson.id;
+                    updateSelectionHighlight();
+                    updateRowButtonsState();
+                });
+
+                // Добавляем сформированную строку в tbody
+                tbody.appendChild(tr);
+            }
+
+            // Переходим к следующей группе (day, lesson_num)
+            i = j;
+        }
+
+        // После отрисовки обновляем состояние кнопок Изменить/Удалить
+        updateRowButtonsState();
+    }
+
+	/*подсветка выбранной строки*/
+    function updateSelectionHighlight() {
+        // Получаем все строки таблицы
+        const rows = document.querySelectorAll("#schedule-body tr");
+
+        // Для каждой строки проверяем: её id совпадает с selectedLessonId?
+        rows.forEach(tr => {
+            const id = tr.dataset.id ? Number(tr.dataset.id) : null;
+            if (id === selectedLessonId) {
+                tr.classList.add("selected-row");
+            } else {
+                tr.classList.remove("selected-row");
+            }
+        });
+    }
+
+    // "Изменить выбранный" / "Удалить"
+
+    function updateRowButtonsState() {
+        // Находим сами кнопки
+        const btnEditRow   = document.getElementById("btn-edit-row");
+        const btnDeleteRow = document.getElementById("btn-delete-row");
+
+        // Проверяем, выбран ли какой-либо урок
+        const hasSelection = selectedLessonId !== null;
+
+        if (hasSelection) {
+            // Если есть выбранная строка — включаем кнопки
+            btnEditRow.disabled   = false;
+            btnDeleteRow.disabled = false;
+            btnEditRow.classList.remove("btn-disabled");
+            btnDeleteRow.classList.remove("btn-disabled");
+        } else {
+            // Если выбранной строки нет — отключаем кнопки
+            btnEditRow.disabled   = true;
+            btnDeleteRow.disabled = true;
+            btnEditRow.classList.add("btn-disabled");
+            btnDeleteRow.classList.add("btn-disabled");
+        }
+    }
+
+    //Модальное окно
+    // Режим модалки: "add" (добавление) или "edit" (редактирование)
+    let modalMode = "add";
+
+    // ID урока, который редактируем (в режиме "edit")
+    let editingLessonId = null;
+
+    // Открытие модального окна
+    function openLessonModal(mode, lesson) {
+        // Запоминаем режим
+        modalMode = mode;
+        // Если урок передан — сохраняем его id, иначе null
+        editingLessonId = lesson ? lesson.id : null;
+
+        // Получаем ссылки на элементы внутри модалки
+        const title          = document.getElementById("lesson-modal-title");
+        const daySelect      = document.getElementById("modal-day");
+        const lessonNumSelect= document.getElementById("modal-lesson-num");
+        const classSelect    = document.getElementById("modal-class");
+        const subjectSelect  = document.getElementById("modal-subject");
+        const teacherSelect  = document.getElementById("modal-teacher");
+        const roomSelect     = document.getElementById("modal-room");
+        const errorBox       = document.getElementById("modal-error");
+
+        // Заголовок модального окна в зависимости от режима
+        title.textContent = (mode === "add") ? "Добавление урока" : "Редактирование урока";
+
+        // Очищаем текст ошибки и убираем подсветку ошибок с полей
+        errorBox.textContent = "";
+        [daySelect, lessonNumSelect, classSelect, subjectSelect, teacherSelect, roomSelect].forEach(el => {
+            el.classList.remove("field-error");
+        });
+
+        // Заполняем селекты из справочников:
+        // 1) список классов
+        fillSelectOptions(classSelect, refClasses, "-- выберите класс --");
+        // 2) список предметов
+        fillSelectOptions(subjectSelect, refSubjects, "-- выберите предмет --");
+
+        // Для учителя используется фильтрация по предмету.
+        // Если редактируем урок — возьмём исходный предмет этого урока,
+        // чтобы подставить правильный набор учителей.
+        const initialSubject   = lesson ? lesson.subject : "";
+        const teachersListInit = getTeachersForSubject(initialSubject);
+        fillSelectOptions(teacherSelect, teachersListInit, "-- выберите учителя --");
+
+        // Список кабинетов
+        fillSelectOptions(roomSelect, refRooms, "-- выберите кабинет --");
+
+        if (mode === "edit" && lesson) {
+            // Если режим редактирования — заполняем поля значениями выбранного урока
+            daySelect.value       = String(lesson.day);
+            lessonNumSelect.value = String(lesson.lesson_num);
+            classSelect.value     = lesson.class_name;
+            subjectSelect.value   = lesson.subject;
+
+            // При редактировании ещё раз убедимся, что для этого предмета подставлен
+            // корректный список учителей, и выберем текущего учителя
+            const teachersForThisSubject = getTeachersForSubject(lesson.subject);
+            fillSelectOptions(teacherSelect, teachersForThisSubject, "-- выберите учителя --");
+            teacherSelect.value = lesson.teacher;
+
+            roomSelect.value = lesson.room;
+        } else {
+            // Режим добавления — все поля сбрасываем
+            daySelect.value       = "";
+            lessonNumSelect.value = "";
+            classSelect.value     = "";
+            subjectSelect.value   = "";
+            teacherSelect.value   = "";
+            roomSelect.value      = "";
+        }
+
+        // При изменении предмета в форме:
+        // подбирать новый список учителей под выбранный предмет.
+        subjectSelect.onchange = () => {
+            const subject  = subjectSelect.value;
+            const teachers = getTeachersForSubject(subject);
+            fillSelectOptions(teacherSelect, teachers, "-- выберите учителя --");
+        };
+
+        // При изменении дня/номера урока —
+        // здесь можно было бы фильтровать по занятости, но сейчас мы только включаем все опции.
+        daySelect.onchange       = applyAvailabilityFilter;
+        lessonNumSelect.onchange = applyAvailabilityFilter;
+
+        // Показываем модальное окно (делаем backdrop видимым)
+        document.getElementById("lesson-modal-backdrop").style.display = "flex";
+
+        // Применяем "фильтр доступности" (пока он просто включает все опции)
+        applyAvailabilityFilter();
+    }
+
+    // Закрытие модального окна
+    function closeLessonModal() {
+        document.getElementById("lesson-modal-backdrop").style.display = "none";
+    }
+
+
+	//Заполнение выпадающего списка
+    function fillSelectOptions(selectEl, values, placeholder) {
+        // Очищаем существующие опции
+        selectEl.innerHTML = "";
+
+        // Добавляем первую "пустую" опцию с текстом-подсказкой
+        const optEmpty = document.createElement("option");
+        optEmpty.value = "";
+        optEmpty.textContent = placeholder;
+        selectEl.appendChild(optEmpty);
+
+        // Добавляем каждое значение как отдельный <option>
+        (values || []).forEach(v => {
+            const opt = document.createElement("option");
+            opt.value = v;
+            opt.textContent = v;
+            selectEl.appendChild(opt);
+        });
+    }
+
+    // Получить список учителей для заданного предмета
+    function getTeachersForSubject(subject) {
+        // 1) Если для предмета есть специальный список в refTeachersBySubject — используем его
+        if (subject && refTeachersBySubject[subject] && refTeachersBySubject[subject].length > 0) {
+            return refTeachersBySubject[subject];
+        }
+        // 2) Иначе (если ничего не нашли) — возвращаем общий список учителей
+        return refTeachers;
+    }
+
+    // пока просто заглушка для фильтрации по занятости
+    function applyAvailabilityFilter() {
+        // Получаем ссылки на селекты
+        const classSelect   = document.getElementById("modal-class");
+        const teacherSelect = document.getElementById("modal-teacher");
+        const roomSelect    = document.getElementById("modal-room");
+
+        // Сейчас фильтруем очень просто: все опции включены.
+        // В будущем здесь можно:
+        //  - вычислять занятые классы/учителей/кабинеты по allLessons
+        //  - отключать недоступные варианты в селектах
+        enableAllOptions(classSelect);
+        enableAllOptions(teacherSelect);
+        enableAllOptions(roomSelect);
+    }
+
+    // к заглушке выши
+    function enableAllOptions(selectEl) {
+        Array.from(selectEl.options).forEach(opt => {
+            opt.disabled = false;
+        });
+    }
+
+	//Проверка клиентов локально
+    function checkConflicts(day, lesson_num, class_name, teacher, room, ignoreId) {
+        let conflictClass   = false;  // флаг: конфликт по "класс"
+        let conflictTeacher = false;  // флаг: конфликт по "учитель"
+        let conflictRoom    = false;  // флаг: конфликт по "кабинет"
+
+        // Пробегаем по всем урокам и ищем совпадения по времени (day, lesson_num)
+        allLessons.forEach(l => {
+            // ignoreId позволяет при редактировании не сравнивать урок сам с собой
+            if (ignoreId != null && l.id === ignoreId) return;
+
+            // Смотрим только на уроки в тот же день и тот же номер урока
+            if (l.day === day && l.lesson_num === lesson_num) {
+                if (l.class_name === class_name) conflictClass   = true;
+                if (l.teacher    === teacher)    conflictTeacher = true;
+                if (l.room       === room)       conflictRoom    = true;
+            }
+        });
+
+        // Формируем текстовую сводку по найденным конфликтам
+        let messages = [];
+        if (conflictClass)   messages.push("Этот класс уже имеет урок в это время.");
+        if (conflictTeacher) messages.push("Этот учитель уже занят в это время.");
+        if (conflictRoom)    messages.push("Этот кабинет уже занят в это время.");
+
+        // Возвращаем объект с признаками конфликтов и текстом
+        return {
+            ok: !(conflictClass || conflictTeacher || conflictRoom), // true, если конфликтов нет
+            conflictClass,
+            conflictTeacher,
+            conflictRoom,
+            message: messages.join(" ")
+        };
+    }
+
+	//Добавление урока при нажатии кнопки ок
+    function handleModalOk() {
+        // Получаем ссылки на селекты и на блок для ошибок
+        const daySelect       = document.getElementById("modal-day");
+        const lessonNumSelect = document.getElementById("modal-lesson-num");
+        const classSelect     = document.getElementById("modal-class");
+        const subjectSelect   = document.getElementById("modal-subject");
+        const teacherSelect   = document.getElementById("modal-teacher");
+        const roomSelect      = document.getElementById("modal-room");
+        const errorBox        = document.getElementById("modal-error");
+
+        // Сначала убираем старые ошибки и подсветку
+        errorBox.textContent = "";
+        [daySelect, lessonNumSelect, classSelect, subjectSelect, teacherSelect, roomSelect].forEach(el => {
+            el.classList.remove("field-error");
+        });
+
+        // Считываем значения из селектов
+        const day       = Number(daySelect.value);
+        const lessonNum = Number(lessonNumSelect.value);
+        const className = classSelect.value;
+        const subject   = subjectSelect.value;
+        const teacher   = teacherSelect.value;
+        const room      = roomSelect.value;
+
+        // Простая валидация: все поля должны быть заполнены
+        let hasError = false;
+        if (!day)       { daySelect.classList.add("field-error");       hasError = true; }
+        if (!lessonNum) { lessonNumSelect.classList.add("field-error"); hasError = true; }
+        if (!className) { classSelect.classList.add("field-error");     hasError = true; }
+        if (!subject)   { subjectSelect.classList.add("field-error");   hasError = true; }
+        if (!teacher)   { teacherSelect.classList.add("field-error");   hasError = true; }
+        if (!room)      { roomSelect.classList.add("field-error");      hasError = true; }
+
+        if (hasError) {
+            // Если есть незаполненные поля — показываем сообщение и выходим
+            errorBox.textContent = "Заполните все поля.";
+            return;
+        }
+
+        // При редактировании — игнорируем текущий урок при проверке конфликтов,
+        // чтобы он не "конфликтовал сам с собой"
+        const ignoreId = (modalMode === "edit") ? editingLessonId : null;
+
+        // Проверяем конфликты в локальном массиве allLessons
+        const conflictResult = checkConflicts(day, lessonNum, className, teacher, room, ignoreId);
+
+        if (!conflictResult.ok) {
+            // Если конфликты есть — пишем текст ошибки в модалку
+            errorBox.textContent = conflictResult.message;
+
+            // И подсвечиваем те поля, по которым возникли конфликты
+            if (conflictResult.conflictClass)   classSelect.classList.add("field-error");
+            if (conflictResult.conflictTeacher) teacherSelect.classList.add("field-error");
+            if (conflictResult.conflictRoom)    roomSelect.classList.add("field-error");
+            return;
+        }
+
+        // Если дошли до сюда — поля заполнены и конфликтов нет
+        if (modalMode === "add") {
+            // Режим "добавление" — создаём новый объект урока
+            const newLesson = {
+                id: nextTempId--,  // временный отрицательный id, сервер потом выдаст настоящий
+                day,
+                lesson_num: lessonNum,
+                class_name: className,
+                subject,
+                teacher,
+                room
+            };
+
+            // Добавляем новый урок в общий массив
+            allLessons.push(newLesson);
+            // Сразу выделяем его в таблице
+            selectedLessonId = newLesson.id;
+
+        } else if (modalMode === "edit") {
+            // Режим "редактирование" — заменяем существующий урок в массиве
+            allLessons = allLessons.map(l => {
+                if (l.id === editingLessonId) {
+                    return {
+                        ...l,
+                        day,
+                        lesson_num: lessonNum,
+                        class_name: className,
+                        subject,
+                        teacher,
+                        room
+                    };
+                }
+                return l;
+            });
+            // Оставляем выделенным этот же урок
+            selectedLessonId = editingLessonId;
+        }
+
+        // Перерисовываем таблицу по обновлённому allLessons
+        renderScheduleTable();
+        // Закрываем модальное окно
+        closeLessonModal();
+    }
+
+
+	//Удаление выбранного урока из расписания
+    function deleteSelectedLesson() {
+        // Если ничего не выбрано — просто выходим
+        if (selectedLessonId == null) return;
+
+        // Спрашиваем подтверждение у пользователя
+        if (!confirm("Удалить выбранный урок?")) return;
+
+        // Фильтруем массив allLessons, удаляя урок с selectedLessonId
+        allLessons = allLessons.filter(l => l.id !== selectedLessonId);
+
+        // Сбрасываем выбор
+        selectedLessonId = null;
+
+        // Перерисовываем таблицу
+        renderScheduleTable();
+    }
+	
+	// Восстанавливает расписание из savedLessons
+    // (откат ко времени последнего сохранения).
+    function cancelChanges() {
+        // Предупреждаем пользователя, что несохранённые изменения пропадут
+        if (!confirm("Отменить все несохранённые изменения?")) return;
+
+        // Возвращаемся к последнему сохранённому состоянию
+        allLessons = JSON.parse(JSON.stringify(savedLessons));
+
+        // Снимаем выделение строки
+        selectedLessonId = null;
+
+        // Перерисовываем таблицу
+        renderScheduleTable();
+    }
+
+
+	//Отправка изменений на сервер
+    function saveChanges() {
+        // Предупреждаем пользователя перед отправкой на сервер
+        if (!confirm("Сохранить изменения в расписании?")) return;
+
+        // Формируем объект payload, который отправим в save_schedule.cgi
+        const payload = {
+            lessons: allLessons.map(l => ({
+                // Новые записи, у которых id < 0 — отправляем как id: 0,
+                // чтобы сервер понимал, что это INSERT.
+                id: l.id > 0 ? l.id : 0,
+                day: l.day,
+                lesson_num: l.lesson_num,
+                class_name: l.class_name,
+                subject: l.subject,
+                teacher: l.teacher,
+                room: l.room
+            }))
+        };
+
+        // Отправляем JSON на сервер методом POST
+        fetch("/cgi-bin/save_schedule.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    // УСПЕШНО: показываем уведомление
+                    alert("Изменения сохранены.");
+
+                    // Считаем, что теперь allLessons — это "новое сохранённое" состояние
+                    savedLessons = JSON.parse(JSON.stringify(allLessons));
+                } else {
+                    // ОШИБКА СО СТОРОНЫ СЕРВЕРА:
+                    // например, сервер нашёл конфликт или другие проблемы
+                    alert("Не удалось сохранить расписание: " + (data.message || "ошибка сервера."));
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА: если CGI ещё нет или недоступен —
+                // считаем, что всё успешно, чтобы работать "в одиночке".
+                alert("Сохранение (заглушка): считаем, что всё успешно.");
+                savedLessons = JSON.parse(JSON.stringify(allLessons));
+            });
+    }
+
+    //На главную (кнопка "Выйти")*/
+    function exitEditPage() {
+        // Предупреждаем, что несохранённые изменения могут быть потеряны
+        if (!confirm("Выйти на главную? Несохранённые изменения могут быть потеряны.")) {
+            return;
+        }
+
+        // Переход на страницу админского меню (URL можно поменять под реальный)
+        window.location.href = "main_admin.html";
+    }
+
+    //Загрузкаданных и события
+    document.addEventListener("DOMContentLoaded", () => {
+        // Находим все нужные элементы интерфейса
+        const btnAdd           = document.getElementById("btn-add");
+        const btnEditRow       = document.getElementById("btn-edit-row");
+        const btnDeleteRow     = document.getElementById("btn-delete-row");
+        const btnCancelChanges = document.getElementById("btn-cancel-changes");
+        const btnSave          = document.getElementById("btn-save");
+        const btnExitEdit      = document.getElementById("btn-exit-edit");
+
+        const modalBackdrop    = document.getElementById("lesson-modal-backdrop");
+        const modalBtnCancel   = document.getElementById("modal-btn-cancel");
+        const modalBtnOk       = document.getElementById("modal-btn-ok");
+
+        // Кнопка "Добавить урок" → открываем модальное окно в режиме "add"
+        if (btnAdd) {
+            btnAdd.addEventListener("click", () => openLessonModal("add", null));
+        }
+
+        // Кнопка "Изменить выбранный" → открываем модалку в режиме "edit"
+        if (btnEditRow) {
+            btnEditRow.addEventListener("click", () => {
+                // Находим урок с id = selectedLessonId
+                const lesson = allLessons.find(l => l.id === selectedLessonId);
+                if (!lesson) return;
+
+                // Открываем модальное окно и передаём туда выбранный урок
+                openLessonModal("edit", lesson);
+            });
+        }
+
+        // Кнопка "Удалить выбранный" → удаляем строку из allLessons
+        if (btnDeleteRow) {
+            btnDeleteRow.addEventListener("click", deleteSelectedLesson);
+        }
+
+        // Кнопка "Отменить изменения" → возвращаем savedLessons в allLessons
+        if (btnCancelChanges) {
+            btnCancelChanges.addEventListener("click", cancelChanges);
+        }
+
+        // Кнопка "Сохранить" → отправляем всё расписание в save_schedule.cgi
+        if (btnSave) {
+            btnSave.addEventListener("click", saveChanges);
+        }
+
+        // Кнопка "Выйти" → переход на главную страницу админа
+        if (btnExitEdit) {
+            btnExitEdit.addEventListener("click", exitEditPage);
+        }
+
+        // Кнопка "Отмена" в модальном окне → закрываем модалку
+        if (modalBtnCancel) {
+            modalBtnCancel.addEventListener("click", closeLessonModal);
+        }
+
+        // Кнопка "ОК" в модальном окне → валидируем поля, проверяем конфликты, сохраняем в allLessons
+        if (modalBtnOk) {
+            modalBtnOk.addEventListener("click", handleModalOk);
+        }
+
+        // Клик по полупрозрачному фону модалки (backdrop) вне белого окна —
+        // закрывает модальное окно (по желанию можно убрать это поведение)
+        if (modalBackdrop) {
+            modalBackdrop.addEventListener("click", (e) => {
+                if (e.target === modalBackdrop) {
+                    closeLessonModal();
+                }
+            });
+        }
+
+        // На старте страницы:
+        // 1) загружаем профиль пользователя
+        loadUserInfo();
+        // 2) загружаем все справочники (в т.ч. teachers_by_subject)
+        loadRefs();
+        // 3) загружаем расписание для редактирования
+        loadSchedule();
+    });
+</script>
+
+</body>
+</html>

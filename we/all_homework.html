@@ -1,0 +1,1595 @@
+<!--
+    ДЛЯ БУДУЩИХ CGI-СКРИПТОВ ПО ДОМАШНИМ ЗАДАНИЯМ (РАЗДЕЛ УЧИТЕЛЯ)
+
+    РОЛЬ:
+    ------
+    Страница для УЧИТЕЛЯ.
+
+    ВАЖНО:
+    - Учитель видит только свои домашние задания (homework.teacher_id = current_user.id),
+      администратор (role_code='admin') может видеть и править всё.
+    - Домашние задания логически делятся на:
+        1) ЗАДАННЫЕ (список заданий учителя)
+        2) ПРИСЛАННЫЕ (список работ учеников по этим заданиям)
+
+    ТАБЛИЦЫ (примерная структура):
+    ------------------------------
+    users:
+      id          INTEGER PK
+      login       TEXT
+      fio         TEXT
+      role_code   TEXT   -- 'admin', 'teacher', ...
+
+    homework:
+      id              INTEGER PK AUTOINCREMENT
+      teacher_id      INTEGER        -- users.id (кто задал ДЗ)
+      class_name      TEXT           -- "5А", "7Б" и т.п.
+      subject         TEXT
+      title           TEXT           -- тема ДЗ
+      description     TEXT
+      deadline        TEXT           -- "YYYY-MM-DD HH:MM"
+      file_path       TEXT           -- путь к файлу от учителя (если есть)
+      created_at      TEXT
+      updated_at      TEXT
+
+    students:
+      id          INTEGER PK
+      fio         TEXT
+      class_name  TEXT
+
+    homework_submissions:
+      id              INTEGER PK AUTOINCREMENT
+      homework_id     INTEGER        -- homework.id
+      student_id      INTEGER        -- students.id
+      student_file    TEXT           -- путь к файлу решения ученика (может быть NULL)
+      submitted_at    TEXT           -- дата фактической сдачи (если сдано)
+      status          TEXT           -- 'pending', 'accepted', 'rejected'
+      grade           TEXT           -- "5", "4", "зачёт", ...
+      comment         TEXT           -- комментарий учителя
+      checked_at      TEXT           -- дата проверки/оценивания
+
+    ----------------------------------------------------------------
+    1) /cgi-bin/profile.cgi   (GET)
+       ----------------------------
+       Определяет текущего пользователя.
+
+       ОТДАЁТ:
+       {
+         "user_id":   5,
+         "role":      "Учитель",
+         "role_code": "teacher",
+         "fio":       "Иванов Иван Иванович"
+       }
+
+       ВАЖНО ДЛЯ ПРАВ:
+       - teacher_id для домашних заданий берётся из current_user.user_id.
+       - Учитель может создавать/редактировать/удалять ТОЛЬКО свои задания
+         (homework.teacher_id == current_user.id).
+       - Админ может редактировать любые.
+
+    2) /cgi-bin/refs.cgi?type=classes   (GET)
+       --------------------------------------
+       Справочник классов:
+         ["5А", "5Б", "6А", "7В", ...]
+
+       Используется:
+         - фильтр по классу
+         - выбор класса при добавлении/редактировании ДЗ
+
+    ---------------------------------------------------
+    БЛОК "ЗАДАННЫЕ ЗАДАНИЯ" (tab "assigned")
+    ---------------------------------------------------
+
+    3) /cgi-bin/teacher_homework_list.cgi   (GET)
+       -------------------------------------------
+       Возвращает список домашних заданий текущего учителя.
+
+       ПАРАМЕТРЫ (query string, опционально):
+         class_name=5А          -- фильтр по классу
+         sort=deadline_desc     -- сортировка:
+                                    "deadline_desc" (по дедлайну, новые сверху)
+                                    "deadline_asc"  (по дедлайну, старые сверху)
+
+       НА СТОРОНЕ CGI:
+         current_user = по сессии
+
+         базовый запрос:
+           SELECT h.*,
+                  (SELECT COUNT(*) FROM students s
+                   WHERE s.class_name = h.class_name) AS total_students,
+                  (SELECT COUNT(*) FROM homework_submissions hs
+                   JOIN students s2 ON s2.id = hs.student_id
+                   WHERE hs.homework_id = h.id) AS submitted_count
+           FROM homework h
+           WHERE
+             (current_user.role_code = 'admin'
+              OR h.teacher_id = current_user.id)
+
+             [AND h.class_name = :class_name]
+
+           ORDER BY
+             CASE WHEN :sort = 'deadline_asc'  THEN h.deadline END ASC,
+             CASE WHEN :sort = 'deadline_desc' THEN h.deadline END DESC,
+             h.id DESC;
+
+       ОТДАЁТ:
+       {
+         "homeworks": [
+           {
+             "id": 1,
+             "class_name": "5А",
+             "subject": "Математика",
+             "title": "Уравнения",
+             "description": "Решить номера 1–10",
+             "deadline": "2025-12-05 23:59",
+             "file_path": "/files/hw/1.pdf",
+             "created_at": "2025-11-30 10:00",
+             "submitted_count": 12,
+             "total_students": 25
+           },
+           ...
+         ]
+       }
+
+    4) /cgi-bin/teacher_homework_save.cgi   (POST, multipart/form-data)
+       -----------------------------------------------------------------
+       Создаёт или обновляет ДЗ.
+
+       ФРОНТ ОТПРАВЛЯЕТ multipart/form-data:
+         id            (число; "0" или пусто — создать новое, >0 — обновить)
+         class_name    (строка, ОБЯЗАТЕЛЬНО)
+         subject       (строка, ОБЯЗАТЕЛЬНО/желательно)
+         title         (строка, ОБЯЗАТЕЛЬНО)
+         description   (строка)
+         deadline      (строка "YYYY-MM-DDTHH:MM" из <input type=datetime-local>)
+         file          (опциональный файл)
+
+       НА СТОРОНЕ CGI:
+         current_user = по сессии
+         если role_code НЕ teacher/admin → ошибка.
+
+         если id == 0 или пусто → INSERT:
+           INSERT INTO homework(
+             teacher_id, class_name, subject, title,
+             description, deadline, file_path, created_at, updated_at
+           ) VALUES (
+             current_user.id, ... , now, now
+           )
+
+         если id > 0:
+           SELECT * FROM homework WHERE id = :id
+           если нет → { ok:false, message:"Домашнее задание не найдено" }
+
+           если current_user.role_code != 'admin'
+              И homework.teacher_id != current_user.id:
+                 → { ok:false, message:"Недостаточно прав" }
+
+           UPDATE homework SET
+             class_name  = :class_name,
+             subject     = :subject,
+             title       = :title,
+             description = :description,
+             deadline    = :deadline,
+             file_path   = (:new_file_path ИЛИ оставить старый),
+             updated_at  = now
+           WHERE id = :id
+
+       ОТВЕТ:
+       { "ok": true } или { "ok": false, "message": "..." }
+
+    5) /cgi-bin/teacher_homework_delete.cgi   (POST, JSON)
+       ---------------------------------------------------
+       Удаление ДЗ.
+
+       ФРОНТ ОТПРАВЛЯЕТ JSON:
+       { "id": 123 }
+
+       НА СТОРОНЕ CGI:
+         current_user = по сессии
+         SELECT * FROM homework WHERE id = :id
+         если нет → { ok:false, message:"Домашнее задание не найдено" }
+
+         если current_user.role_code != 'admin'
+            И homework.teacher_id != current_user.id:
+               → { ok:false, message:"Недостаточно прав для удаления" }
+
+         DELETE FROM homework WHERE id = :id
+
+       ОТВЕТ:
+       { "ok": true } или { "ok": false, "message": "..." }
+
+    ---------------------------------------------------
+    БЛОК "ПРИСЛАННЫЕ РАБОТЫ" (tab "submitted")
+    ---------------------------------------------------
+
+    6) /cgi-bin/teacher_homework_submissions_list.cgi   (GET)
+       ------------------------------------------------------
+       Список ПРИСЛАННЫХ работ по всем ДЗ данного учителя.
+
+       ПАРАМЕТРЫ (query string, опционально):
+         class_name=5А         -- фильтр по классу ученика
+         status=pending        -- 'pending' / 'accepted' / 'rejected' / 'all'
+         sort=submitted_desc   -- сортировка по дате сдачи:
+                                  'submitted_desc' (новые сверху)
+                                  'submitted_asc'  (старые сверху)
+
+       НА СТОРОНЕ CGI:
+         current_user = по сессии
+
+         SELECT hs.*,
+                h.class_name,
+                h.subject,
+                h.title,
+                h.deadline,
+                s.fio AS student_fio,
+                s.class_name AS student_class_name
+         FROM homework_submissions hs
+         JOIN homework h ON h.id = hs.homework_id
+         JOIN students s ON s.id = hs.student_id
+         WHERE
+           (current_user.role_code = 'admin'
+            OR h.teacher_id = current_user.id)
+
+           [AND s.class_name = :class_name]
+
+           [AND (:status = 'all' OR hs.status = :status)]
+
+         ORDER BY
+           CASE WHEN :sort = 'submitted_asc'  THEN hs.submitted_at END ASC,
+           CASE WHEN :sort = 'submitted_desc' THEN hs.submitted_at END DESC,
+           hs.id DESC;
+
+       ОТДАЁТ:
+       {
+         "submissions": [
+           {
+             "id": 10,               -- id в homework_submissions
+             "homework_id": 1,
+             "student_id": 25,
+             "student_fio": "Петров Пётр",
+             "student_class_name": "5А",
+             "subject": "Математика",
+             "title": "Уравнения",
+             "deadline": "2025-12-05 23:59",
+             "submitted_at": "2025-12-04 21:00",
+             "status": "pending",
+             "grade": "",
+             "comment": ""
+           },
+           ...
+         ]
+       }
+
+       ВАЖНО:
+       - При клике по строке фронт открывает:
+         check_homework.html?homework_id=...&student_id=...
+         CGI на check_homework уже проверяет права (teacher_id / admin).
+
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Домашние задания — Учитель</title>
+
+    <style>
+        /* Общие стили страницы */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        .topbar-nav {
+            display: flex;
+            gap: 8px;
+        }
+
+        .nav-btn {
+            padding: 6px 12px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: none;
+            border-radius: 20px;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .nav-btn.active {
+            background: #770f77;
+            color: #ffffff;
+        }
+
+        .nav-btn:hover {
+            background: #f0d1f0;
+        }
+
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        .tab-buttons {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .tab-btn {
+            padding: 8px 16px;
+            border-radius: 999px;
+            border: 1px solid #cc10cc;
+            background: #ffffff;
+            color: #cc10cc;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .tab-btn.active {
+            background: #cc10cc;
+            color: #ffffff;
+        }
+
+        .tab-btn:hover {
+            background: #f7e3f7;
+        }
+
+        .controls {
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .controls-left,
+        .controls-right {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        .btn-danger {
+            padding: 8px 16px;
+            background: #ff4d4d;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-danger:hover {
+            background: #cc0000;
+        }
+
+        .btn-disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        .filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 10px;
+            align-items: center;
+        }
+
+        .filters label {
+            font-size: 13px;
+        }
+
+        .filters select {
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 13px;
+        }
+
+        .homework-wrapper,
+        .submissions-wrapper {
+            margin-top: 10px;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        .selected-row td {
+            background: #ffe5ff;
+        }
+
+        .text-cell {
+            max-width: 260px;
+        }
+
+        .link-file {
+            color: #0066cc;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+
+        .footer-buttons {
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal {
+            background: #ffffff;
+            padding: 20px 24px;
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+            width: 480px;
+            max-width: 95%;
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            color: #660066;
+        }
+
+        .modal-row {
+            margin-bottom: 10px;
+        }
+
+        .modal-row label {
+            display: block;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        .modal-row input,
+        .modal-row textarea,
+        .modal-row select {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .field-error {
+            border: 2px solid #ff4d4d !important;
+        }
+
+        .modal-buttons {
+            margin-top: 14px;
+            text-align: right;
+        }
+
+        .modal-error {
+            margin-top: 6px;
+            font-size: 13px;
+            color: #cc0000;
+            min-height: 18px;
+        }
+
+        .badge-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            border: 1px solid #bbb;
+        }
+
+        .badge-status.pending {
+            border-color: #999999;
+        }
+
+        .badge-status.accepted {
+            border-color: #1f8f1f;
+        }
+
+        .badge-status.rejected {
+            border-color: #c20000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Домашние задания
+            </div>
+            <div class="topbar-user">
+                Роль: <span id="user-role">Учитель</span>,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+        <div class="topbar-nav">
+            <button class="nav-btn active" id="nav-homework">Домашние задания</button>
+            <button class="nav-btn" id="nav-materials">Материалы</button>
+            <button class="nav-btn" id="nav-notifications">Оповещения</button>
+        </div>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Домашние задания</div>
+
+        <div class="tab-buttons">
+            <button class="tab-btn active" id="tab-assigned">Заданные задания</button>
+            <button class="tab-btn" id="tab-submitted">Присланные работы</button>
+        </div>
+
+        <!-- ====== СЕКЦИЯ "ЗАДАННЫЕ ЗАДАНИЯ" ====== -->
+        <div id="section-assigned">
+            <div class="controls">
+                <div class="controls-left">
+                    <button class="btn-primary" id="btn-add-hw">Задать ДЗ</button>
+                    <button class="btn-secondary btn-disabled" id="btn-edit-hw" disabled>
+                        Изменить выбранное
+                    </button>
+                    <button class="btn-danger btn-disabled" id="btn-delete-hw" disabled>
+                        Удалить выбранное
+                    </button>
+                </div>
+                <div class="controls-right">
+                    <button class="btn-secondary" id="btn-reload-hw">Обновить список</button>
+                </div>
+            </div>
+
+            <div class="filters">
+                <div>
+                    <label for="filter-class-hw">Класс:</label>
+                    <select id="filter-class-hw">
+                        <option value="">Все классы</option>
+                        <!-- заполняется из refs.cgi -->
+                    </select>
+                </div>
+                <div>
+                    <label for="filter-sort-hw">Сортировка по дедлайну:</label>
+                    <select id="filter-sort-hw">
+                        <option value="deadline_desc">Сначала новые</option>
+                        <option value="deadline_asc">Сначала старые</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="homework-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Класс</th>
+                            <th>Предмет</th>
+                            <th>Тема</th>
+                            <th>Описание</th>
+                            <th>Файл</th>
+                            <th>Дедлайн</th>
+                            <th>Дата создания</th>
+                            <th>Сдано / всего</th>
+                        </tr>
+                    </thead>
+                    <tbody id="homework-body">
+                        <!-- строки с ДЗ -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ====== СЕКЦИЯ "ПРИСЛАННЫЕ РАБОТЫ" ====== -->
+        <div id="section-submitted" style="display:none;">
+            <div class="controls">
+                <div class="controls-left">
+                    <!-- пока только обновить -->
+                </div>
+                <div class="controls-right">
+                    <button class="btn-secondary" id="btn-reload-sub">Обновить список</button>
+                </div>
+            </div>
+
+            <div class="filters">
+                <div>
+                    <label for="filter-class-sub">Класс ученика:</label>
+                    <select id="filter-class-sub">
+                        <option value="">Все классы</option>
+                        <!-- заполняется из refs.cgi -->
+                    </select>
+                </div>
+                <div>
+                    <label for="filter-status-sub">Статус:</label>
+                    <select id="filter-status-sub">
+                        <option value="all">Все</option>
+                        <option value="pending">Не проверено</option>
+                        <option value="accepted">Принято</option>
+                        <option value="rejected">Не принято</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="filter-sort-sub">Сортировка по дате сдачи:</label>
+                    <select id="filter-sort-sub">
+                        <option value="submitted_desc">Сначала новые</option>
+                        <option value="submitted_asc">Сначала старые</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="submissions-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Класс</th>
+                            <th>Ученик</th>
+                            <th>Предмет</th>
+                            <th>Тема ДЗ</th>
+                            <th>Дедлайн</th>
+                            <th>Дата сдачи</th>
+                            <th>Статус</th>
+                            <th>Оценка</th>
+                        </tr>
+                    </thead>
+                    <tbody id="submissions-body">
+                        <!-- строки с присланными работами -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="page-message" id="page-message"></div>
+
+        <div class="footer-buttons">
+            <button class="btn-secondary" id="btn-exit">Выйти</button>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно для добавления/редактирования ДЗ -->
+<div class="modal-backdrop" id="hw-modal-backdrop">
+    <div class="modal">
+        <div class="modal-title" id="hw-modal-title">Задать домашнее задание</div>
+
+        <input type="hidden" id="hw-id" value="">
+
+        <div class="modal-row">
+            <label for="hw-class">Кому (класс)</label>
+            <select id="hw-class">
+                <!-- из refs.cgi -->
+            </select>
+        </div>
+
+        <div class="modal-row">
+            <label for="hw-subject">Предмет</label>
+            <input type="text" id="hw-subject" placeholder="Например: Математика">
+        </div>
+
+        <div class="modal-row">
+            <label for="hw-title">Тема</label>
+            <input type="text" id="hw-title" placeholder="Тема домашнего задания">
+        </div>
+
+        <div class="modal-row">
+            <label for="hw-description">Описание</label>
+            <textarea id="hw-description" placeholder="Описание задания"></textarea>
+        </div>
+
+        <div class="modal-row">
+            <label for="hw-deadline">Дедлайн</label>
+            <input type="datetime-local" id="hw-deadline">
+        </div>
+
+        <div class="modal-row">
+            <label for="hw-file">Файл (при необходимости)</label>
+            <input type="file" id="hw-file">
+        </div>
+
+        <div class="modal-error" id="hw-modal-error"></div>
+
+        <div class="modal-buttons">
+            <button class="btn-secondary" id="hw-modal-btn-cancel">Отмена</button>
+            <button class="btn-primary" id="hw-modal-btn-ok">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const currentUser = {
+        userId: null,
+        roleCode: "teacher",
+        fio: ""
+    };
+
+    const defaultRefClasses = ["5А", "5Б", "6А", "7В"];
+    let refClasses = [...defaultRefClasses];
+
+    // Заданные задания
+    let assignedHomeworks = [];
+    let selectedHomeworkId = null;
+
+    // Присланные работы
+    let submissions = [];
+
+    // =======================
+    // Профиль
+    // =======================
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId   = data.user_id || null;
+                currentUser.roleCode = data.role_code || "teacher";
+                currentUser.fio      = data.fio || "";
+
+                document.getElementById("user-role").textContent = data.role || "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio || "Иванов Иван Иванович (тест)";
+            })
+            .catch(() => {
+                currentUser.userId   = 5;
+                currentUser.roleCode = "teacher";
+                currentUser.fio      = "Иванов Иван Иванович (тест)";
+
+                document.getElementById("user-role").textContent = "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio;
+            });
+    }
+
+    // =======================
+    // Справочник классов
+    // =======================
+    function loadRefClasses() {
+        fetch("/cgi-bin/refs.cgi?type=classes")
+            .then(res => res.json())
+            .then(data => {
+                if (Array.isArray(data)) {
+                    refClasses = data;
+                } else {
+                    refClasses = [...defaultRefClasses];
+                }
+                fillClassSelects();
+            })
+            .catch(() => {
+                refClasses = [...defaultRefClasses];
+                fillClassSelects();
+            });
+    }
+
+    function fillClassSelects() {
+        const filterClassHw  = document.getElementById("filter-class-hw");
+        const filterClassSub = document.getElementById("filter-class-sub");
+        const modalClass     = document.getElementById("hw-class");
+
+        // фильтр для "Заданные"
+        if (filterClassHw) {
+            filterClassHw.innerHTML = "";
+            const optAll = document.createElement("option");
+            optAll.value = "";
+            optAll.textContent = "Все классы";
+            filterClassHw.appendChild(optAll);
+
+            refClasses.forEach(c => {
+                const opt = document.createElement("option");
+                opt.value = c;
+                opt.textContent = c;
+                filterClassHw.appendChild(opt);
+            });
+        }
+
+        // фильтр для "Присланные"
+        if (filterClassSub) {
+            filterClassSub.innerHTML = "";
+            const optAll = document.createElement("option");
+            optAll.value = "";
+            optAll.textContent = "Все классы";
+            filterClassSub.appendChild(optAll);
+
+            refClasses.forEach(c => {
+                const opt = document.createElement("option");
+                opt.value = c;
+                opt.textContent = c;
+                filterClassSub.appendChild(opt);
+            });
+        }
+
+        // селект в модалке
+        if (modalClass) {
+            modalClass.innerHTML = "";
+            const optEmpty = document.createElement("option");
+            optEmpty.value = "";
+            optEmpty.textContent = "-- выберите класс --";
+            modalClass.appendChild(optEmpty);
+
+            refClasses.forEach(c => {
+                const opt = document.createElement("option");
+                opt.value = c;
+                opt.textContent = c;
+                modalClass.appendChild(opt);
+            });
+        }
+    }
+
+    // =======================
+    // Загрузка "Заданные задания"
+    // =======================
+    function loadAssignedHomeworks() {
+        const tbody = document.getElementById("homework-body");
+        const pageMessage = document.getElementById("page-message");
+
+        tbody.innerHTML = "";
+        pageMessage.textContent = "";
+        pageMessage.style.color = "#cc0000";
+
+        const classFilter = document.getElementById("filter-class-hw")?.value || "";
+        const sortFilter  = document.getElementById("filter-sort-hw")?.value || "deadline_desc";
+
+        const params = new URLSearchParams();
+        if (classFilter) params.append("class_name", classFilter);
+        if (sortFilter)  params.append("sort", sortFilter);
+
+        const url = "/cgi-bin/teacher_homework_list.cgi" + (params.toString() ? "?" + params.toString() : "");
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                const list = Array.isArray(data) ? data : (data.homeworks || []);
+                assignedHomeworks = list;
+                renderAssignedTable();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                assignedHomeworks = [
+                    {
+                        id: 1,
+                        class_name: "5А",
+                        subject: "Математика",
+                        title: "Уравнения",
+                        description: "Решить №1–10 в тетради.",
+                        deadline: "2025-12-05 23:59",
+                        file_path: "/files/hw/1.pdf",
+                        created_at: "2025-11-30 10:00",
+                        submitted_count: 5,
+                        total_students: 25
+                    },
+                    {
+                        id: 2,
+                        class_name: "6Б",
+                        subject: "Математика",
+                        title: "Дроби",
+                        description: "Повторить теорию.",
+                        deadline: "2025-12-02 23:59",
+                        file_path: "",
+                        created_at: "2025-11-28 12:00",
+                        submitted_count: 10,
+                        total_students: 24
+                    }
+                ];
+                renderAssignedTable();
+            });
+    }
+
+    function renderAssignedTable() {
+        const tbody = document.getElementById("homework-body");
+        tbody.innerHTML = "";
+
+        if (!assignedHomeworks.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 8;
+            td.textContent = "Домашние задания не найдены.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            selectedHomeworkId = null;
+            updateAssignedButtons();
+            updateAssignedSelectionHighlight();
+            return;
+        }
+
+        assignedHomeworks.forEach(hw => {
+            const tr = document.createElement("tr");
+            tr.dataset.id = hw.id;
+
+            const tdClass = document.createElement("td");
+            tdClass.textContent = hw.class_name || "";
+            tr.appendChild(tdClass);
+
+            const tdSubj = document.createElement("td");
+            tdSubj.textContent = hw.subject || "";
+            tr.appendChild(tdSubj);
+
+            const tdTitle = document.createElement("td");
+            tdTitle.textContent = hw.title || "";
+            tr.appendChild(tdTitle);
+
+            const tdDesc = document.createElement("td");
+            tdDesc.className = "text-cell";
+            tdDesc.textContent = hw.description || "";
+            tr.appendChild(tdDesc);
+
+            const tdFile = document.createElement("td");
+            if (hw.file_path) {
+                const a = document.createElement("a");
+                a.href = hw.file_path;
+                a.textContent = "Скачать";
+                a.className = "link-file";
+                a.target = "_blank";
+                tdFile.appendChild(a);
+            } else {
+                tdFile.textContent = "—";
+            }
+            tr.appendChild(tdFile);
+
+            const tdDeadline = document.createElement("td");
+            tdDeadline.textContent = hw.deadline || "";
+            tr.appendChild(tdDeadline);
+
+            const tdCreated = document.createElement("td");
+            tdCreated.textContent = hw.created_at || "";
+            tr.appendChild(tdCreated);
+
+            const tdCount = document.createElement("td");
+            const submitted = hw.submitted_count != null ? hw.submitted_count : "?";
+            const total     = hw.total_students != null ? hw.total_students : "?";
+            tdCount.textContent = submitted + " / " + total;
+            tr.appendChild(tdCount);
+
+            tr.addEventListener("click", () => {
+                selectedHomeworkId = hw.id;
+                updateAssignedSelectionHighlight();
+                updateAssignedButtons();
+            });
+
+            tbody.appendChild(tr);
+        });
+
+        updateAssignedSelectionHighlight();
+        updateAssignedButtons();
+    }
+
+    function updateAssignedSelectionHighlight() {
+        const rows = document.querySelectorAll("#homework-body tr");
+        rows.forEach(tr => {
+            const id = tr.dataset.id ? Number(tr.dataset.id) : null;
+            if (id === selectedHomeworkId) {
+                tr.classList.add("selected-row");
+            } else {
+                tr.classList.remove("selected-row");
+            }
+        });
+    }
+
+    function updateAssignedButtons() {
+        const btnEdit   = document.getElementById("btn-edit-hw");
+        const btnDelete = document.getElementById("btn-delete-hw");
+
+        const hasSelection = selectedHomeworkId !== null;
+
+        if (hasSelection) {
+            btnEdit.disabled   = false;
+            btnDelete.disabled = false;
+            btnEdit.classList.remove("btn-disabled");
+            btnDelete.classList.remove("btn-disabled");
+        } else {
+            btnEdit.disabled   = true;
+            btnDelete.disabled = true;
+            btnEdit.classList.add("btn-disabled");
+            btnDelete.classList.add("btn-disabled");
+        }
+    }
+
+    // =======================
+    // Загрузка "Присланные работы"
+    // =======================
+    function loadSubmissions() {
+        const tbody = document.getElementById("submissions-body");
+        const pageMessage = document.getElementById("page-message");
+
+        tbody.innerHTML = "";
+        pageMessage.textContent = "";
+        pageMessage.style.color = "#cc0000";
+
+        const classFilter  = document.getElementById("filter-class-sub")?.value || "";
+        const statusFilter = document.getElementById("filter-status-sub")?.value || "all";
+        const sortFilter   = document.getElementById("filter-sort-sub")?.value || "submitted_desc";
+
+        const params = new URLSearchParams();
+        if (classFilter)  params.append("class_name", classFilter);
+        if (statusFilter) params.append("status", statusFilter);
+        if (sortFilter)   params.append("sort", sortFilter);
+
+        const url = "/cgi-bin/teacher_homework_submissions_list.cgi" + (params.toString() ? "?" + params.toString() : "");
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                const list = Array.isArray(data) ? data : (data.submissions || []);
+                submissions = list;
+                renderSubmissionsTable();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                submissions = [
+                    {
+                        id: 10,
+                        homework_id: 1,
+                        student_id: 101,
+                        student_fio: "Петров Пётр",
+                        student_class_name: "5А",
+                        subject: "Математика",
+                        title: "Уравнения",
+                        deadline: "2025-12-05 23:59",
+                        submitted_at: "2025-12-04 20:30",
+                        status: "pending",
+                        grade: "",
+                        comment: ""
+                    },
+                    {
+                        id: 11,
+                        homework_id: 2,
+                        student_id: 102,
+                        student_fio: "Сидорова Анна",
+                        student_class_name: "6Б",
+                        subject: "Математика",
+                        title: "Дроби",
+                        deadline: "2025-12-02 23:59",
+                        submitted_at: "2025-12-02 18:00",
+                        status: "accepted",
+                        grade: "5",
+                        comment: "Отлично"
+                    }
+                ];
+                renderSubmissionsTable();
+            });
+    }
+
+    function renderSubmissionsTable() {
+        const tbody = document.getElementById("submissions-body");
+        tbody.innerHTML = "";
+
+        if (!submissions.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 8;
+            td.textContent = "Присланные работы отсутствуют.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+        }
+
+        submissions.forEach(item => {
+            const tr = document.createElement("tr");
+
+            const tdClass = document.createElement("td");
+            tdClass.textContent = item.student_class_name || "";
+            tr.appendChild(tdClass);
+
+            const tdFio = document.createElement("td");
+            tdFio.textContent = item.student_fio || "";
+            tr.appendChild(tdFio);
+
+            const tdSubj = document.createElement("td");
+            tdSubj.textContent = item.subject || "";
+            tr.appendChild(tdSubj);
+
+            const tdTitle = document.createElement("td");
+            tdTitle.textContent = item.title || "";
+            tr.appendChild(tdTitle);
+
+            const tdDeadline = document.createElement("td");
+            tdDeadline.textContent = item.deadline || "";
+            tr.appendChild(tdDeadline);
+
+            const tdSubmitted = document.createElement("td");
+            tdSubmitted.textContent = item.submitted_at || "";
+            tr.appendChild(tdSubmitted);
+
+            const tdStatus = document.createElement("td");
+            const spanStatus = document.createElement("span");
+            spanStatus.className = "badge-status " + (item.status || "pending");
+            spanStatus.textContent = statusText(item.status || "pending");
+            tdStatus.appendChild(spanStatus);
+            tr.appendChild(tdStatus);
+
+            const tdGrade = document.createElement("td");
+            tdGrade.textContent = item.grade || "";
+            tr.appendChild(tdGrade);
+
+            tr.addEventListener("click", () => {
+                // переходим на страницу проверки конкретной работы
+                if (item.homework_id && item.student_id) {
+                    const url = "check_homework.html?homework_id=" + encodeURIComponent(item.homework_id) +
+                                "&student_id=" + encodeURIComponent(item.student_id);
+                    window.location.href = url;
+                }
+            });
+
+            tbody.appendChild(tr);
+        });
+    }
+
+    function statusText(code) {
+        switch (code) {
+            case "accepted": return "Принято";
+            case "rejected": return "Не принято";
+            case "pending":
+            default: return "Не проверено";
+        }
+    }
+
+    // =======================
+    // Модалка: открыть/закрыть
+    // =======================
+    function openHwModal(mode, hw) {
+        const modalTitle = document.getElementById("hw-modal-title");
+        const idField    = document.getElementById("hw-id");
+        const classSel   = document.getElementById("hw-class");
+        const subjInp    = document.getElementById("hw-subject");
+        const titleInp   = document.getElementById("hw-title");
+        const descTa     = document.getElementById("hw-description");
+        const ddlInp     = document.getElementById("hw-deadline");
+        const fileInp    = document.getElementById("hw-file");
+        const errorBox   = document.getElementById("hw-modal-error");
+
+        errorBox.textContent = "";
+        [classSel, subjInp, titleInp, descTa, ddlInp].forEach(el => {
+            if (el) el.classList.remove("field-error");
+        });
+
+        if (mode === "add") {
+            modalTitle.textContent = "Задать домашнее задание";
+            idField.value          = "";
+            classSel.value         = "";
+            subjInp.value          = "";
+            titleInp.value         = "";
+            descTa.value           = "";
+            ddlInp.value           = "";
+            if (fileInp) fileInp.value = "";
+        } else if (mode === "edit" && hw) {
+            modalTitle.textContent = "Редактирование домашнего задания";
+            idField.value          = hw.id || "";
+            classSel.value         = hw.class_name || "";
+            subjInp.value          = hw.subject || "";
+            titleInp.value         = hw.title || "";
+            descTa.value           = hw.description || "";
+            // deadline из БД может быть "YYYY-MM-DD HH:MM" — CGI может конвертнуть в "YYYY-MM-DDTHH:MM"
+            ddlInp.value           = hw.deadline || "";
+            if (fileInp) fileInp.value = "";
+        }
+
+        document.getElementById("hw-modal-backdrop").style.display = "flex";
+    }
+
+    function closeHwModal() {
+        document.getElementById("hw-modal-backdrop").style.display = "none";
+    }
+
+    // =======================
+    // Сохранение ДЗ
+    // =======================
+    function handleHwModalOk() {
+        const idField  = document.getElementById("hw-id");
+        const classSel = document.getElementById("hw-class");
+        const subjInp  = document.getElementById("hw-subject");
+        const titleInp = document.getElementById("hw-title");
+        const descTa   = document.getElementById("hw-description");
+        const ddlInp   = document.getElementById("hw-deadline");
+        const fileInp  = document.getElementById("hw-file");
+        const errorBox = document.getElementById("hw-modal-error");
+        const pageMessage = document.getElementById("page-message");
+
+        errorBox.textContent = "";
+        pageMessage.textContent = "";
+        pageMessage.style.color = "#cc0000";
+
+        [classSel, subjInp, titleInp, descTa, ddlInp].forEach(el => {
+            if (el) el.classList.remove("field-error");
+        });
+
+        const id        = idField.value ? Number(idField.value) : 0;
+        const className = classSel.value.trim();
+        const subject   = subjInp.value.trim();
+        const title     = titleInp.value.trim();
+        const descr     = descTa.value.trim();
+        const deadline  = ddlInp.value;  // "YYYY-MM-DDTHH:MM" как есть
+
+        let hasError = false;
+
+        if (!className) {
+            classSel.classList.add("field-error");
+            hasError = true;
+        }
+        if (!subject) {
+            subjInp.classList.add("field-error");
+            hasError = true;
+        }
+        if (!title) {
+            titleInp.classList.add("field-error");
+            hasError = true;
+        }
+        if (!deadline) {
+            ddlInp.classList.add("field-error");
+            hasError = true;
+        }
+
+        if (hasError) {
+            errorBox.textContent = "Заполните обязательные поля (класс, предмет, тема, дедлайн).";
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("id", String(id || 0));
+        formData.append("class_name", className);
+        formData.append("subject", subject);
+        formData.append("title", title);
+        formData.append("description", descr);
+        formData.append("deadline", deadline);
+
+        if (fileInp && fileInp.files && fileInp.files.length > 0) {
+            formData.append("file", fileInp.files[0]);
+        }
+
+        saveHomework(formData);
+    }
+
+    function saveHomework(formData) {
+        const errorBox    = document.getElementById("hw-modal-error");
+        const pageMessage = document.getElementById("page-message");
+
+        fetch("/cgi-bin/teacher_homework_save.cgi", {
+            method: "POST",
+            body: formData
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Домашнее задание сохранено.");
+                    closeHwModal();
+                    loadAssignedHomeworks();
+                    pageMessage.style.color = "#007700";
+                    pageMessage.textContent = "Домашнее задание успешно сохранено.";
+                } else {
+                    const msg = data.message || "Ошибка сохранения домашнего задания.";
+                    errorBox.textContent = msg;
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                alert("Сохранение (заглушка): считаем, что всё успешно.");
+                closeHwModal();
+
+                const id = Number(formData.get("id") || 0);
+                const newHw = {
+                    id: id || (assignedHomeworks.reduce((m, n) => Math.max(m, n.id || 0), 0) + 1),
+                    class_name: formData.get("class_name") || "",
+                    subject: formData.get("subject") || "",
+                    title: formData.get("title") || "",
+                    description: formData.get("description") || "",
+                    deadline: formData.get("deadline") || "",
+                    file_path: formData.get("file") ? "Заглушка-файл" : "",
+                    created_at: "локально",
+                    submitted_count: 0,
+                    total_students: "?"
+                };
+
+                if (id > 0) {
+                    assignedHomeworks = assignedHomeworks.map(hw =>
+                        hw.id === id ? newHw : hw
+                    );
+                } else {
+                    assignedHomeworks.push(newHw);
+                }
+
+                renderAssignedTable();
+                pageMessage.style.color = "#007700";
+                pageMessage.textContent = "Домашнее задание сохранено (локально, без CGI).";
+            });
+    }
+
+    // =======================
+    // Удаление ДЗ
+    // =======================
+    function deleteSelectedHomework() {
+        const pageMessage = document.getElementById("page-message");
+
+        if (selectedHomeworkId == null) return;
+        if (!confirm("Удалить выбранное домашнее задание?")) return;
+
+        const payload = { id: selectedHomeworkId };
+
+        fetch("/cgi-bin/teacher_homework_delete.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Домашнее задание удалено.");
+                    selectedHomeworkId = null;
+                    loadAssignedHomeworks();
+                    pageMessage.style.color = "#007700";
+                    pageMessage.textContent = "Домашнее задание успешно удалено.";
+                } else {
+                    const msg = data.message || "Ошибка удаления домашнего задания.";
+                    pageMessage.style.color = "#cc0000";
+                    pageMessage.textContent = msg;
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                alert("Удаление (заглушка): считаем, что всё успешно.");
+                assignedHomeworks = assignedHomeworks.filter(hw => hw.id !== selectedHomeworkId);
+                selectedHomeworkId = null;
+                renderAssignedTable();
+                pageMessage.style.color = "#007700";
+                pageMessage.textContent = "Домашнее задание удалено (локально, без CGI).";
+            });
+    }
+
+    // =======================
+    // Переключение вкладок
+    // =======================
+    function switchTab(tabName) {
+        const sectionAssigned = document.getElementById("section-assigned");
+        const sectionSubmitted = document.getElementById("section-submitted");
+        const tabAssigned = document.getElementById("tab-assigned");
+        const tabSubmitted = document.getElementById("tab-submitted");
+
+        if (tabName === "assigned") {
+            sectionAssigned.style.display = "";
+            sectionSubmitted.style.display = "none";
+            tabAssigned.classList.add("active");
+            tabSubmitted.classList.remove("active");
+        } else {
+            sectionAssigned.style.display = "none";
+            sectionSubmitted.style.display = "";
+            tabAssigned.classList.remove("active");
+            tabSubmitted.classList.add("active");
+        }
+    }
+
+    // =======================
+    // Навигация
+    // =======================
+    function setupNavigation() {
+        const btnHw   = document.getElementById("nav-homework");
+        const btnMat  = document.getElementById("nav-materials");
+        const btnNotif= document.getElementById("nav-notifications");
+
+        if (btnHw) {
+            btnHw.addEventListener("click", () => {
+                // уже здесь
+            });
+        }
+        if (btnMat) {
+            btnMat.addEventListener("click", () => {
+                window.location.href = "material.html";
+            });
+        }
+        if (btnNotif) {
+            btnNotif.addEventListener("click", () => {
+                window.location.href = "notifications.html";
+            });
+        }
+    }
+
+    // =======================
+    // Выход
+    // =======================
+    function exitHomeworkPage() {
+        if (!confirm("Выйти в меню учителя? Несохранённые изменения могут быть потеряны.")) {
+            return;
+        }
+        window.location.href = "teacher_menu.html";
+    }
+
+    // =======================
+    // Инициализация
+    // =======================
+    document.addEventListener("DOMContentLoaded", () => {
+        setupNavigation();
+        loadUserInfo();
+        loadRefClasses();
+
+        // Кнопки вкладок
+        const tabAssigned = document.getElementById("tab-assigned");
+        const tabSubmitted= document.getElementById("tab-submitted");
+
+        if (tabAssigned) {
+            tabAssigned.addEventListener("click", () => {
+                switchTab("assigned");
+                loadAssignedHomeworks();
+            });
+        }
+        if (tabSubmitted) {
+            tabSubmitted.addEventListener("click", () => {
+                switchTab("submitted");
+                loadSubmissions();
+            });
+        }
+
+        // Обновление списков
+        const btnReloadHw  = document.getElementById("btn-reload-hw");
+        const btnReloadSub = document.getElementById("btn-reload-sub");
+
+        if (btnReloadHw) {
+            btnReloadHw.addEventListener("click", loadAssignedHomeworks);
+        }
+        if (btnReloadSub) {
+            btnReloadSub.addEventListener("click", loadSubmissions);
+        }
+
+        // Фильтры
+        const filterClassHw   = document.getElementById("filter-class-hw");
+        const filterSortHw    = document.getElementById("filter-sort-hw");
+        const filterClassSub  = document.getElementById("filter-class-sub");
+        const filterStatusSub = document.getElementById("filter-status-sub");
+        const filterSortSub   = document.getElementById("filter-sort-sub");
+
+        if (filterClassHw)   filterClassHw.addEventListener("change", loadAssignedHomeworks);
+        if (filterSortHw)    filterSortHw.addEventListener("change", loadAssignedHomeworks);
+        if (filterClassSub)  filterClassSub.addEventListener("change", loadSubmissions);
+        if (filterStatusSub) filterStatusSub.addEventListener("change", loadSubmissions);
+        if (filterSortSub)   filterSortSub.addEventListener("change", loadSubmissions);
+
+        // Модалка ДЗ
+        const btnAddHw      = document.getElementById("btn-add-hw");
+        const btnEditHw     = document.getElementById("btn-edit-hw");
+        const btnDeleteHw   = document.getElementById("btn-delete-hw");
+        const hwModalOk     = document.getElementById("hw-modal-btn-ok");
+        const hwModalCancel = document.getElementById("hw-modal-btn-cancel");
+        const hwModalBackdrop = document.getElementById("hw-modal-backdrop");
+
+        if (btnAddHw) {
+            btnAddHw.addEventListener("click", () => openHwModal("add", null));
+        }
+        if (btnEditHw) {
+            btnEditHw.addEventListener("click", () => {
+                const hw = assignedHomeworks.find(h => h.id === selectedHomeworkId);
+                if (!hw) return;
+                openHwModal("edit", hw);
+            });
+        }
+        if (btnDeleteHw) {
+            btnDeleteHw.addEventListener("click", deleteSelectedHomework);
+        }
+
+        if (hwModalOk) {
+            hwModalOk.addEventListener("click", handleHwModalOk);
+        }
+        if (hwModalCancel) {
+            hwModalCancel.addEventListener("click", closeHwModal);
+        }
+        if (hwModalBackdrop) {
+            hwModalBackdrop.addEventListener("click", (e) => {
+                if (e.target === hwModalBackdrop) {
+                    closeHwModal();
+                }
+            });
+        }
+
+        // Выход
+        const btnExit = document.getElementById("btn-exit");
+        if (btnExit) {
+            btnExit.addEventListener("click", exitHomeworkPage);
+        }
+
+        // По умолчанию открываем "Заданные"
+        switchTab("assigned");
+        loadAssignedHomeworks();
+    });
+</script>
+
+</body>
+</html>

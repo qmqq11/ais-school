@@ -1,0 +1,772 @@
+<!--   
+главня страница школяра
+
+    БАЗА (примерный вариант)
+    users:
+      id           INTEGER PK
+      login        TEXT
+      fio          TEXT
+      role_code    TEXT    -- 'student'
+      class_name   TEXT    -- "5А" и т.п.
+
+    schedule_template:     -- "шаблон" расписания по дням недели
+      id           INTEGER PK
+      day_of_week  INTEGER  -- 1..6 (1=Пн, ..., 6=Сб)
+      class_name   TEXT
+      lesson_num   INTEGER  -- 1..7
+      subject      TEXT
+      teacher_fio  TEXT
+      room         TEXT
+
+    marks:
+      id           INTEGER PK
+      student_id   INTEGER (users.id)
+      date         TEXT    -- 'YYYY-MM-DD'
+      subject      TEXT
+      mark         REAL    -- 2..5 или NULL
+      attendance   TEXT    -- 'н','б','у' или ''
+
+
+    1) /cgi-bin/profile.cgi   (GET)
+       • Определить текущего пользователя по сессии.
+       • Проверить, что он "student".
+       • Вернуть JSON:
+         {
+           "user_id":   123,
+           "fio":       "Петров Иван Иванович",
+           "role":      "Ученик",
+           "role_code": "student",
+           "class_name":"7Б"
+         }
+       • Если сессии нет/роль не student → 401/ошибка.
+
+
+    2) /cgi-bin/student_schedule_day.cgi?date=YYYY-MM-DD   (GET)
+       выдать расписание УЧЕНИКА на конкретную дату.
+
+       • Взять текущего пользователя из сессии → class_name.
+       • Прочитать параметр ?date=YYYY-MM-DD.
+       • Определить день недели day_of_week (1..6) по этой дате:
+       • По day_of_week и class_name выбрать записи из schedule_template
+       • Вернуть JSON:
+         {
+           "date": "2025-09-01",
+           "lessons": [
+             { "lesson_num": 1, "subject": "Математика", "teacher": "Иванов И.И.", "room": "203" },
+             ...
+           ]
+         }
+
+    3) /cgi-bin/student_marks_summary.cgi?date=YYYY-MM-DD   (GET)--
+       выдать ОЦЕНКИ и ПОСЕЩАЕМOСТЬ ученика по КОНКРЕТНОЙ ДАТЕ.
+       • Взять current_user из сессии → student_id.
+       • Прочитать параметр ?date=YYYY-MM-DD.
+       • Выбрать из marks все записи по этому студенту и дате:
+       • Сформировать JSON вида:
+         {
+           "date": "2025-09-01",
+           "by_subject": [
+             { "subject": "Математика",   "mark": 5,   "attendance": ""  },
+             { "subject": "Русский язык", "mark": 4,   "attendance": ""  },
+             { "subject": "История",      "mark": null,"attendance": "н" }
+           ]
+         }
+
+
+
+    4) /cgi-bin/student_marks_all.cgi   (GET)
+       все оценки ученика по всем датам (нижняя таблица).
+
+       • Взять current_user из сессии → student_id.
+       • Выбрать все записи из marks по этому студенту:
+       • Сформировать:
+           - список уникальных дат (отсортировать по возрастанию);
+           - по каждому предмету → массив {date, mark, attendance} + средний балл avg.
+       • Вернуть JSON:
+         {
+           "dates": ["2025-09-01", "2025-09-02", ...],
+           "subjects": [
+             {
+               "subject": "Математика",
+               "values": [
+                 { "date": "2025-09-01", "mark": 5,   "attendance": ""  },
+                 { "date": "2025-09-02", "mark": null,"attendance": "н" }
+               ],
+               "avg": 4.80
+             },
+             ...
+           ]
+         }
+       • Фронт строит таблицу:
+           Предмет | 2025-09-01 | 2025-09-02 | ... | Средний балл
+
+    • НЕ доверять данным с клиента — все данные (роль, ученик, класс, оценки) брать только по сессии и из базы.
+    • Все JSON-ответы возвращать с корректным Content-Type
+-->
+
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Главная — Ученик</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        .nav-buttons {
+            margin-bottom: 16px;
+        }
+
+        .nav-buttons button {
+            margin-right: 10px;
+        }
+
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        .date-controls {
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .date-controls input[type="date"] {
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+        }
+
+        .schedule-wrapper,
+        .marks-wrapper {
+            margin-top: 16px;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        .page-message {
+            margin-top: 8px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+
+        /* Горизонтальная прокрутка для таблицы "Все оценки" с множеством дат */
+        .horizontal-scroll {
+            overflow-x: auto;
+            overflow-y: hidden;
+            width: 100%;
+        }
+        .horizontal-scroll table {
+            min-width: max-content;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Ученик
+            </div>
+            <div class="topbar-user">
+                Ученик: <span id="user-fio">Фамилия Имя Отчество</span>,
+                Класс: <span id="user-class">5А</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="content">
+        <div class="nav-buttons">
+            <button class="btn-secondary" id="btn-notifications">Оповещения</button>
+            <button class="btn-secondary" id="btn-homework">Домашние задания</button>
+            <button class="btn-secondary" id="btn-materials">Материалы</button>
+        </div>
+
+        <div class="panel-title">Расписание на день</div>
+
+        <div class="date-controls">
+            <button class="btn-secondary" id="btn-prev-day">&larr;</button>
+            <input type="date" id="date-picker">
+            <button class="btn-secondary" id="btn-next-day">&rarr;</button>
+            <button class="btn-secondary" id="btn-today">Сегодня</button>
+        </div>
+
+        <div class="schedule-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>№ урока</th>
+                        <th>Предмет</th>
+                        <th>Учитель</th>
+                        <th>Кабинет</th>
+                        <th>Оценка</th>
+                        <th>Посещаемость</th>
+                    </tr>
+                </thead>
+                <tbody id="schedule-body">
+                    <!-- строки уроков + оценка/посещаемость -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- все оценки по датам -->
+        <div class="panel-title" style="margin-top: 24px;">Все оценки по датам</div>
+        <div class="marks-wrapper horizontal-scroll">
+            <table>
+                <thead>
+                    <tr id="all-marks-header-row">
+                        <!-- динамически: Предмет | дата | дата | ... | Средний балл -->
+                    </tr>
+                </thead>
+                <tbody id="all-marks-body">
+                    <!-- строки вида "Математика | 5 | н | 5 | 5.00" -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="page-message" id="page-message"></div>
+    </div>
+</div>
+
+<script>
+    // Информация о текущем пользователе (ученике)
+    const currentUser = {
+        userId: null,
+        fio: "",
+        className: "",
+        roleCode: "student"
+    };
+
+    // Текущая дата, выбранная на странице (формат YYYY-MM-DD)
+    let currentDate = null;
+
+    // Данные для таблицы "Все оценки"
+    let allMarksDates = [];      // массив дат
+    let allMarksSubjects = [];   // массив предметов с оценками по датам
+
+    // Преобразовать объект Date → строку вида "YYYY-MM-DD" (для input[type=date])
+    function formatDateToInput(d) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${dd}`;
+    }
+
+    // Сдвинуть выбранную дату на указанное число дней (±1) и перезагрузить данные
+    function shiftCurrentDate(days) {
+        const dp = document.getElementById("date-picker");
+        if (!dp.value) {
+            const now = new Date();
+            currentDate = formatDateToInput(now);
+        } else {
+            currentDate = dp.value;
+        }
+
+        const parts = currentDate.split("-");
+        const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+        d.setDate(d.getDate() + days);
+        currentDate = formatDateToInput(d);
+        dp.value = currentDate;
+        loadScheduleAndMarks(currentDate);
+    }
+
+    // Загрузить профиль ученика (ФИО, класс) из /cgi-bin/profile.cgi
+    // Если CGI пока нет — использовать тестовую заглушку.
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId    = data.user_id || null;
+                currentUser.fio       = data.fio || "";
+                currentUser.className = data.class_name || "";
+                currentUser.roleCode  = data.role_code || "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio || "ФИО (тест)";
+                document.getElementById("user-class").textContent = currentUser.className || "5А";
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если profile.cgi ещё не реализован
+                currentUser.userId    = 100;
+                currentUser.fio       = "Тестовый Ученик";
+                currentUser.className = "7Б";
+                currentUser.roleCode  = "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio;
+                document.getElementById("user-class").textContent = currentUser.className;
+            });
+    }
+
+    // Загрузить на выбранную дату:
+    //   1) расписание ученика
+    //   2) оценки/посещаемость за день (поверх этого расписания)
+    function loadScheduleAndMarks(dateStr) {
+        const pageMessage = document.getElementById("page-message");
+        pageMessage.textContent = "";
+
+        // Сначала отрисовываем строки расписания, затем в них "подмешиваем" оценки
+        loadSchedule(dateStr).then(() => {
+            loadMarksSummary(dateStr);
+        });
+    }
+
+    // Загрузка расписания ученика на день:
+    //   /cgi-bin/student_schedule_day.cgi?date=...
+    // Возвращаем Promise, чтобы можно было дождаться отрисовки, прежде чем подставлять оценки.
+    function loadSchedule(dateStr) {
+        const tbody = document.getElementById("schedule-body");
+        tbody.innerHTML = "";
+
+        return fetch(`/cgi-bin/student_schedule_day.cgi?date=${encodeURIComponent(dateStr)}`)
+            .then(res => res.json())
+            .then(data => {
+                const lessons = data.lessons || [];
+                if (!lessons.length) {
+                    const tr = document.createElement("tr");
+                    const td = document.createElement("td");
+                    td.colSpan = 6;
+                    td.textContent = "На этот день занятий нет.";
+                    tr.appendChild(td);
+                    tbody.appendChild(tr);
+                    return;
+                }
+
+                // Строим строки: №, предмет, учитель, кабинет, (пока пустые) оценка, посещаемость
+                lessons.forEach(lesson => {
+                    const tr = document.createElement("tr");
+
+                    const tdNum = document.createElement("td");
+                    tdNum.textContent = lesson.lesson_num || "";
+                    tr.appendChild(tdNum);
+
+                    const tdSub = document.createElement("td");
+                    tdSub.textContent = lesson.subject || "";
+                    tr.appendChild(tdSub);
+
+                    const tdTeacher = document.createElement("td");
+                    tdTeacher.textContent = lesson.teacher || "";
+                    tr.appendChild(tdTeacher);
+
+                    const tdRoom = document.createElement("td");
+                    tdRoom.textContent = lesson.room || "";
+                    tr.appendChild(tdRoom);
+
+                    // Пустые ячейки под оценку и посещаемость за этот урок/предмет.
+                    // Позже будут заполнены в loadMarksSummary().
+                    const tdMark = document.createElement("td");
+                    tdMark.className = "cell-mark";
+                    tdMark.dataset.subject = lesson.subject || "";
+                    tdMark.textContent = "";
+                    tr.appendChild(tdMark);
+
+                    const tdAtt = document.createElement("td");
+                    tdAtt.className = "cell-attendance";
+                    tdAtt.dataset.subject = lesson.subject || "";
+                    tdAtt.textContent = "";
+                    tr.appendChild(tdAtt);
+
+                    tbody.appendChild(tr);
+                });
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если student_schedule_day.cgi ещё нет
+                const fakeLessons = [
+                    { lesson_num: 1, subject: "Математика",   teacher: "Иванов И.И.",  room: "203" },
+                    { lesson_num: 2, subject: "Русский язык", teacher: "Петров П.П.",  room: "205" },
+                    { lesson_num: 3, subject: "Информатика",  teacher: "Сидорова А.А.",room: "каб. информатики" }
+                ];
+                fakeLessons.forEach(lesson => {
+                    const tr = document.createElement("tr");
+
+                    const tdNum = document.createElement("td");
+                    tdNum.textContent = lesson.lesson_num;
+                    tr.appendChild(tdNum);
+
+                    const tdSub = document.createElement("td");
+                    tdSub.textContent = lesson.subject;
+                    tr.appendChild(tdSub);
+
+                    const tdTeacher = document.createElement("td");
+                    tdTeacher.textContent = lesson.teacher;
+                    tr.appendChild(tdTeacher);
+
+                    const tdRoom = document.createElement("td");
+                    tdRoom.textContent = lesson.room;
+                    tr.appendChild(tdRoom);
+
+                    const tdMark = document.createElement("td");
+                    tdMark.className = "cell-mark";
+                    tdMark.dataset.subject = lesson.subject;
+                    tr.appendChild(tdMark);
+
+                    const tdAtt = document.createElement("td");
+                    tdAtt.className = "cell-attendance";
+                    tdAtt.dataset.subject = lesson.subject;
+                    tr.appendChild(tdAtt);
+
+                    tbody.appendChild(tr);
+                });
+            });
+    }
+
+    // Загрузка оценок/посещаемости за день:
+    //   /cgi-bin/student_marks_summary.cgi?date=...
+    // Используем только by_subject, чтобы заполнить "Оценка" и "Посещаемость" в расписании.
+    function loadMarksSummary(dateStr) {
+
+        fetch(`/cgi-bin/student_marks_summary.cgi?date=${encodeURIComponent(dateStr)}`)
+            .then(res => res.json())
+            .then(data => {
+                const bySubject = data.by_subject || [];
+
+                // 1) строим словарь: предмет → { mark, attendance }
+                const map = {};
+                bySubject.forEach(item => {
+                    map[item.subject] = {
+                        mark: item.mark,
+                        attendance: item.attendance || ""
+                    };
+                });
+
+                // 2) пробегаем по строкам расписания и подставляем значения по предмету
+                document.querySelectorAll("#schedule-body tr").forEach(tr => {
+                    const tdSub = tr.children[1]; // 0:№, 1:Предмет
+                    if (!tdSub) return;
+                    const subject = tdSub.textContent.trim();
+                    const info = map[subject];
+                    if (!info) return;
+
+                    const tdMark = tr.querySelector(".cell-mark");
+                    const tdAtt  = tr.querySelector(".cell-attendance");
+
+                    if (tdMark) tdMark.textContent = (info.mark != null ? info.mark : "");
+                    if (tdAtt)  tdAtt.textContent  = info.attendance;
+                });
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если student_marks_summary.cgi ещё нет
+                const fake = {
+                    by_subject: [
+                        { subject: "Математика",   mark: 5,   attendance: "" },
+                        { subject: "Русский язык", mark: 4,   attendance: "" },
+                        { subject: "История",      mark: null,attendance: "н" }
+                    ]
+                };
+
+                const map = {};
+                fake.by_subject.forEach(item => {
+                    map[item.subject] = {
+                        mark: item.mark,
+                        attendance: item.attendance || ""
+                    };
+                });
+
+                document.querySelectorAll("#schedule-body tr").forEach(tr => {
+                    const tdSub = tr.children[1];
+                    if (!tdSub) return;
+                    const subject = tdSub.textContent.trim();
+                    const info = map[subject];
+                    if (!info) return;
+
+                    const tdMark = tr.querySelector(".cell-mark");
+                    const tdAtt  = tr.querySelector(".cell-attendance");
+
+                    if (tdMark) tdMark.textContent = (info.mark != null ? info.mark : "");
+                    if (tdAtt)  tdAtt.textContent  = info.attendance;
+                });
+            });
+    }
+
+    // ===== ВСЕ ОЦЕНКИ ПО ВСЕМ ДАТАМ (нижняя таблица) =====
+
+    // Загрузка всех оценок и посещаемости по всем датам:
+    //   /cgi-bin/student_marks_all.cgi
+    // Строим заголовок с датами и строки по предметам.
+    function loadAllMarks() {
+        const headerRow = document.getElementById("all-marks-header-row");
+        const body      = document.getElementById("all-marks-body");
+        headerRow.innerHTML = "";
+        body.innerHTML      = "";
+
+        fetch("/cgi-bin/student_marks_all.cgi")
+            .then(res => res.json())
+            .then(data => {
+                allMarksDates    = data.dates || [];
+                allMarksSubjects = data.subjects || [];
+                renderAllMarksTable();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если student_marks_all.cgi ещё нет
+                allMarksDates = ["2025-09-01", "2025-09-02", "2025-09-03"];
+                allMarksSubjects = [
+                    {
+                        subject: "Математика",
+                        values: [
+                            { date: "2025-09-01", mark: 5,   attendance: "" },
+                            { date: "2025-09-02", mark: null,attendance: "н" },
+                            { date: "2025-09-03", mark: 5,   attendance: "" }
+                        ],
+                        avg: 5.0
+                    },
+                    {
+                        subject: "Русский язык",
+                        values: [
+                            { date: "2025-09-01", mark: 4, attendance: "" },
+                            { date: "2025-09-02", mark: 5, attendance: "" },
+                            { date: "2025-09-03", mark: null, attendance: "" }
+                        ],
+                        avg: 4.5
+                    }
+                ];
+                renderAllMarksTable();
+            });
+    }
+
+    // Отрисовать таблицу "Все оценки по датам" на основе allMarksDates/allMarksSubjects
+    function renderAllMarksTable() {
+        const headerRow = document.getElementById("all-marks-header-row");
+        const body      = document.getElementById("all-marks-body");
+
+        headerRow.innerHTML = "";
+        body.innerHTML      = "";
+
+        // Заголовок: Предмет | дата | дата | ... | Средний балл
+        const thSubject = document.createElement("th");
+        thSubject.textContent = "Предмет";
+        headerRow.appendChild(thSubject);
+
+        allMarksDates.forEach(d => {
+            const th = document.createElement("th");
+            th.textContent = d;
+            headerRow.appendChild(th);
+        });
+
+        const thAvg = document.createElement("th");
+        thAvg.textContent = "Средний балл";
+        headerRow.appendChild(thAvg);
+
+        if (!allMarksSubjects.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 1 + allMarksDates.length + 1;
+            td.textContent = "Оценок пока нет.";
+            tr.appendChild(td);
+            body.appendChild(tr);
+            return;
+        }
+
+        allMarksSubjects.forEach(subj => {
+            const tr = document.createElement("tr");
+
+            const tdSub = document.createElement("td");
+            tdSub.textContent = subj.subject || "";
+            tr.appendChild(tdSub);
+
+            allMarksDates.forEach(d => {
+                const td = document.createElement("td");
+                const val = (subj.values || []).find(v => v.date === d);
+
+                if (val) {
+                    const mark = (val.mark != null ? val.mark : "");
+                    const att  = val.attendance || "";
+
+                    // Логика: только оценка / только "н"/"б"/"у" / или "5 (н)"
+                    if (mark && !att) {
+                        td.textContent = mark;
+                    } else if (!mark && att) {
+                        td.textContent = att;
+                    } else if (mark && att) {
+                        td.textContent = mark + " (" + att + ")";
+                    } else {
+                        td.textContent = "";
+                    }
+                } else {
+                    td.textContent = "";
+                }
+
+                tr.appendChild(td);
+            });
+
+            const tdAvg = document.createElement("td");
+            if (subj.avg != null) {
+                tdAvg.textContent = subj.avg.toFixed(2);
+            } else {
+                tdAvg.textContent = "";
+            }
+            tr.appendChild(tdAvg);
+
+            body.appendChild(tr);
+        });
+    }
+
+    // Инициализация страницы: события на кнопках + первичная загрузка данных
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnPrev  = document.getElementById("btn-prev-day");
+        const btnNext  = document.getElementById("btn-next-day");
+        const btnToday = document.getElementById("btn-today");
+        const datePick = document.getElementById("date-picker");
+
+        const btnNotif = document.getElementById("btn-notifications");
+        const btnHw    = document.getElementById("btn-homework");
+        const btnMat   = document.getElementById("btn-materials");
+
+        // Переключение дней (← / → / Сегодня)
+        if (btnPrev) {
+            btnPrev.addEventListener("click", () => shiftCurrentDate(-1));
+        }
+        if (btnNext) {
+            btnNext.addEventListener("click", () => shiftCurrentDate(1));
+        }
+        if (btnToday) {
+            btnToday.addEventListener("click", () => {
+                const now = new Date();
+                currentDate = formatDateToInput(now);
+                datePick.value = currentDate;
+                loadScheduleAndMarks(currentDate);
+            });
+        }
+
+        // Ручной выбор даты через календарь
+        if (datePick) {
+            datePick.addEventListener("change", () => {
+                if (!datePick.value) return;
+                currentDate = datePick.value;
+                loadScheduleAndMarks(currentDate);
+            });
+
+            // По умолчанию — сегодняшняя дата
+            const now = new Date();
+            currentDate = formatDateToInput(now);
+            datePick.value = currentDate;
+        }
+
+        // Переходы на другие страницы ученика
+        if (btnNotif) {
+            btnNotif.addEventListener("click", () => {
+                window.location.href = "student_notifications.html";
+            });
+        }
+        if (btnHw) {
+            btnHw.addEventListener("click", () => {
+                window.location.href = "student_homework.html";
+            });
+        }
+        if (btnMat) {
+            btnMat.addEventListener("click", () => {
+                window.location.href = "student_materials.html";
+            });
+        }
+
+        // Стартовая загрузка:
+        loadUserInfo();                                           // профиль ученика
+        loadScheduleAndMarks(currentDate || formatDateToInput(new Date())); // расписание + оценки за сегодня
+        loadAllMarks();                                           // нижняя таблица "Все оценки"
+    });
+</script>
+
+</body>
+</html>

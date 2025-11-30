@@ -1,0 +1,548 @@
+<!--
+  lesson_journal.html
+    Страница "Журнал урока" для учителя.
+    Отображает информацию об уроке и списке учеников,
+    позволяет:
+      • отмечать присутствие/отсутствие (Н/Б/У);
+      • выставлять/корректировать оценки по уроку.
+
+
+
+    1) /cgi-bin/profile.cgi  [GET]
+       - Определяет текущего пользователя по сессии.
+       - Ожидаемый JSON:
+           {
+             "user_id":   <INT>,
+             "role":      "Учитель",
+             "role_code": "teacher",
+             "fio":       "Фамилия Имя Отчество"
+           }
+       - При отсутствии авторизации — 403 
+
+    2) /cgi-bin/lesson_journal_data.cgi?lesson_id=123  [GET]
+       - Вход: lesson_id (query-param).
+       - Проверить, что текущий пользователь — учитель этого урока.
+       - Вернуть:
+           {
+             "ok": true,
+             "lesson": {
+               "lesson_id": 123,
+               "date": "2025-12-01",
+               "lesson_num": 1,
+               "subject": "Математика",
+               "class_name": "5А",
+               "room": "203"
+             },
+             "students": [
+               {
+                 "student_id": 10,
+                 "fio": "Петров Пётр",
+                 "presence": "н",   // '', 'н', 'б', 'у'
+                 "grade": "5"
+               },
+               ...
+             ]
+           }
+
+    3) /cgi-bin/save_lesson_journal.cgi  [POST, JSON]
+       - Входной JSON от фронта:
+           {
+             "lesson_id": 123,
+             "students": [
+               { "student_id": 10, "presence": "н", "grade": "5" },
+               { "student_id": 11, "presence": "б", "grade": ""  }
+             ]
+           }
+       - Проверить права: lesson.teacher_id == current_user.id.
+       - Сделать INSERT/UPDATE в lesson_students.
+       - Ответ:
+           { "ok": true }
+         либо:
+           { "ok": false, "message": "..." }
+
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Журнал урока — Учитель</title>
+
+    <style>
+        /* Базовые стили страницы: фон, шрифт, убираем отступы браузера */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Основной "карточный" контейнер страницы */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель с названием и ФИО пользователя */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        /* Основной контент страницы: отступы от краёв контейнера */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Строка с информацией об уроке (предмет, класс, дата и т.п.) */
+        .lesson-info {
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+
+        .lesson-info span {
+            font-weight: bold;
+        }
+
+        /* Основная фиолетовая кнопка (Сохранить) */
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        /* Вспомогательные белые/бордовые кнопки (Выйти, Задать ДЗ) */
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        /* Контейнер с кнопками внизу страницы */
+        .footer-buttons {
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* Обёртка таблицы журнала — позволяет горизонтальный скролл на узких экранах */
+        .journal-wrapper {
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+
+        /* Базовые стили таблицы журнала */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: middle;
+        }
+
+        /* Селект присутствия и поле оценки растягиваются на всю ширину ячейки */
+        .presence-select,
+        .grade-input {
+            width: 100%;
+            box-sizing: border-box;
+            font-size: 13px;
+        }
+
+        /* Поле для сообщений пользователю (ошибки/успехи) под таблицей */
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Журнал урока
+            </div>
+            <div class="topbar-user">
+                Роль: <span id="user-role">Учитель</span>,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Журнал урока</div>
+
+        <!-- Блок с данными конкретного урока (подставляем из CGI) -->
+        <div class="lesson-info" id="lesson-info">
+            Урок: <span id="lesson-subject">---</span>,
+            Класс: <span id="lesson-class">---</span>,
+            Дата: <span id="lesson-date">---</span>,
+            № урока: <span id="lesson-num">---</span>,
+            Кабинет: <span id="lesson-room">---</span>
+        </div>
+
+        <!-- Таблица журнала. Тело таблицы (tbody) наполняется динамически из JS -->
+        <div class="journal-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ФИО ученика</th>
+                        <th>Присутствие<br>(Н/Б/У)</th>
+                        <th>Оценка</th>
+                    </tr>
+                </thead>
+                <tbody id="journal-body">
+                    <!-- строки будут добавлены из CGI / JS -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Сообщения об ошибках / результатах действий на странице -->
+        <div class="page-message" id="page-message"></div>
+
+        <!-- Кнопки действия: задать ДЗ (переход), выйти, сохранить журнал -->
+        <div class="footer-buttons">
+            <button class="btn-secondary" id="btn-goto-homework">Задать ДЗ</button>
+            <button class="btn-secondary" id="btn-exit">Выйти</button>
+            <button class="btn-primary" id="btn-save">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+
+    // Текущий пользователь (заполняется из profile.cgi)
+    const currentUser = {
+        userId: null,        // numeric ID пользователя в БД
+        roleCode: "teacher", // строковый код роли (ожидается "teacher")
+        fio: ""              // ФИО для отображения в шапке
+    };
+
+    // lesson_id из URL (ID урока, журнал которого показываем)
+    let lessonId = null;
+
+    // Локальные данные журнала (массив студентов и их состояние в форме)
+    // Каждый элемент: {student_id, fio, presence, grade}
+    let journalStudents = [];
+
+    /**
+     * Возвращает значение query-параметра name из URL.
+     * Пример: ?lesson_id=5 -> getQueryParam("lesson_id") === "5"
+     */
+    function getQueryParam(name) {
+        const params = new URLSearchParams(window.location.search);
+        return params.get(name);
+    }
+
+
+    // Загрузка профиля пользователя
+    function loadUserInfo() {
+
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                // Записываем данные пользователя в объект currentUser
+                currentUser.userId   = data.user_id || null;
+                currentUser.roleCode = data.role_code || "teacher";
+                currentUser.fio      = data.fio || "";
+
+                // Отражаем в шапке страницы
+                document.getElementById("user-role").textContent = data.role || "Учитель";
+                document.getElementById("user-fio").textContent  = data.fio || "Учитель (тест)";
+            })
+            .catch(() => {
+                // Заглушка, если CGI ещё нет или вернул ошибку
+                currentUser.userId   = 5;
+                currentUser.roleCode = "teacher";
+                currentUser.fio      = "Иванов Иван Иванович (тест)";
+                document.getElementById("user-role").textContent = "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio;
+            });
+    }
+
+
+    // Загрузка данных урока и журнала
+    function loadLessonJournal() {
+        const msg = document.getElementById("page-message");
+        msg.textContent = ""; // очищаем предыдущее сообщение
+
+        if (!lessonId) {
+            // Если нет lesson_id в адресной строке — не можем загрузить журнал
+            msg.textContent = "Не указан lesson_id в адресной строке.";
+            return;
+        }
+
+        fetch("/cgi-bin/lesson_journal_data.cgi?lesson_id=" + encodeURIComponent(lessonId))
+            .then(res => res.json())
+            .then(data => {
+                if (!data.ok) {
+                    // Сервер сообщил об ошибке загрузки
+                    msg.textContent = data.message || "Ошибка загрузки данных журнала.";
+                    return;
+                }
+
+                const lesson = data.lesson || {};
+                const students = data.students || [];
+
+                // Заполняем информацию об уроке в верхнем блоке
+                document.getElementById("lesson-subject").textContent = lesson.subject || "";
+                document.getElementById("lesson-class").textContent   = lesson.class_name || "";
+                document.getElementById("lesson-date").textContent    = lesson.date || "";
+                document.getElementById("lesson-num").textContent     = lesson.lesson_num || "";
+                document.getElementById("lesson-room").textContent    = lesson.room || "";
+
+                // Локально сохраняем список студентов с их текущими отметками и оценками
+                journalStudents = students.map(s => ({
+                    student_id: s.student_id,
+                    fio: s.fio || "",
+                    presence: s.presence || "",
+                    grade: s.grade || ""
+                }));
+
+                // Перерисовываем таблицу журнала на основе journalStudents
+                renderJournalTable();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА: пример данных, если CGI ещё не готов или упал
+                document.getElementById("lesson-subject").textContent = "Математика";
+                document.getElementById("lesson-class").textContent   = "5А";
+                document.getElementById("lesson-date").textContent    = "2025-12-01";
+                document.getElementById("lesson-num").textContent     = "1";
+                document.getElementById("lesson-room").textContent    = "203";
+
+                journalStudents = [
+                    { student_id: 10, fio: "Петров Пётр",   presence: "н", grade: "5" },
+                    { student_id: 11, fio: "Сидорова Анна", presence: "",  grade: ""  },
+                    { student_id: 12, fio: "Иванов Илья",   presence: "б", grade: ""  }
+                ];
+
+                renderJournalTable();
+            });
+    }
+
+    //Отрисовывает таблицу журнала на основе массива journalStudents.
+    function renderJournalTable() {
+        const tbody = document.getElementById("journal-body");
+        tbody.innerHTML = ""; // очищаем старые строки
+
+        journalStudents.forEach(st => {
+            const tr = document.createElement("tr");
+
+            // --- колонка ФИО (просто текст, без кликов) ---
+            const tdFio = document.createElement("td");
+            tdFio.textContent = st.fio;
+            tr.appendChild(tdFio);
+
+            // --- колонка Присутствие (селект: пусто/н/б/у) ---
+            const tdPresence = document.createElement("td");
+            const sel = document.createElement("select");
+            sel.className = "presence-select";
+
+            // Набор опций для селекта
+            const options = [
+                { value: "", label: ""  }, // пусто
+                { value: "н", label: "Н" },
+                { value: "б", label: "Б" },
+                { value: "у", label: "У" }
+            ];
+
+            options.forEach(o => {
+                const opt = document.createElement("option");
+                opt.value = o.value;
+                opt.textContent = o.label;
+                if (st.presence === o.value) {
+                    opt.selected = true; // отмечаем текущее значение
+                }
+                sel.appendChild(opt);
+            });
+
+            // При изменении селекта обновляем локальное значение st.presence
+            sel.addEventListener("change", () => {
+                st.presence = sel.value;
+            });
+
+            tdPresence.appendChild(sel);
+            tr.appendChild(tdPresence);
+
+            // --- колонка Оценка (text input) ---
+            const tdGrade = document.createElement("td");
+            const inputGrade = document.createElement("input");
+            inputGrade.type = "text";
+            inputGrade.value = st.grade;
+            inputGrade.className = "grade-input";
+
+            // При вводе в поле сразу обновляем st.grade
+            inputGrade.addEventListener("input", () => {
+                st.grade = inputGrade.value;
+            });
+
+            tdGrade.appendChild(inputGrade);
+            tr.appendChild(tdGrade);
+
+            // Добавляем строку в таблицу
+            tbody.appendChild(tr);
+        });
+    }
+
+
+    // Сохранение журнала
+    function saveLessonJournal() {
+        const msg = document.getElementById("page-message");
+        msg.textContent = ""; // очищаем прошлое сообщение
+
+        if (!lessonId) {
+            msg.textContent = "Не указан lesson_id.";
+            return;
+        }
+
+        // Формируем JSON-плейлоад для отправки на сервер
+        const payload = {
+            lesson_id: Number(lessonId),
+            students: journalStudents.map(st => ({
+                student_id: st.student_id,
+                presence: st.presence || "",
+                grade: st.grade || ""
+            }))
+        };
+
+        fetch("/cgi-bin/save_lesson_journal.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    // При успехе показываем алерт и зелёное сообщение
+                    alert("Журнал сохранён.");
+                    msg.style.color = "#007700";
+                    msg.textContent = "Журнал успешно сохранён.";
+                } else {
+                    // Сервер вернул ошибку сохранения
+                    msg.style.color = "#cc0000";
+                    msg.textContent = data.message || "Ошибка сохранения журнала.";
+                }
+            })
+            .catch(() => {
+                // Заглушка, если CGI ещё не реализован или недоступен
+                alert("Сохранение (заглушка): считаем, что всё успешно.");
+                msg.style.color = "#007700";
+                msg.textContent = "Журнал сохранён локально (заглушка).";
+            });
+    }
+
+    //Обработчик кнопки "Выйти".
+    function exitLessonJournal() {
+        if (!confirm("Выйти из журнала урока? Несохранённые изменения будут потеряны.")) {
+            return;
+        }
+        window.location.href = "teacher_menu.html";
+    }
+
+    // Обработчик кнопки "Задать ДЗ".
+
+    function gotoAllHomework() {
+        if (!confirm("Перейти к домашним заданиям? Несохранённые изменения в журнале будут потеряны.")) {
+            return;
+        }
+        window.location.href = "all_homework.html";
+    }
+
+
+    document.addEventListener("DOMContentLoaded", () => {
+        // Считываем lesson_id из адресной строки
+        lessonId = getQueryParam("lesson_id");
+
+        // Загружаем профиль пользователя и данные журнала
+        loadUserInfo();
+        loadLessonJournal();
+
+        // Находим DOM-элементы кнопок
+        const btnSave   = document.getElementById("btn-save");
+        const btnExit   = document.getElementById("btn-exit");
+        const btnGotoHw = document.getElementById("btn-goto-homework");
+
+        // Вешаем обработчики событий на кнопки
+        if (btnSave) {
+            btnSave.addEventListener("click", saveLessonJournal);
+        }
+        if (btnExit) {
+            btnExit.addEventListener("click", exitLessonJournal);
+        }
+        if (btnGotoHw) {
+            btnGotoHw.addEventListener("click", gotoAllHomework);
+        }
+    });
+</script>
+
+</body>
+</html>

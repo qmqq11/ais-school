@@ -1,0 +1,363 @@
+<!--
+   
+  Эта HTML-страница — главная панель администратора электронной школы.
+    Здесь отображается расписание всей школы, кнопки управления и информация о текущем пользователе.
+      • Загружает роль и ФИО авторизованного пользователя из profile.cgi
+      • Подтягивает расписание из schedule.cgi (в виде готовых <tr> строк)
+      • Позволяет перейти:
+            – в режим редактирования расписания,
+            – в раздел оповещений,
+            – в списки пользователей.
+      • Позволяет выйти из системы (logout.cgi)
+
+      После успешного входа (index.cgi) в сессии уже лежат:
+          user_id, role, fio.
+      Эти данные используются:
+          – для отображения верхней панели (роль + ФИО)
+          – для проверки прав доступа на стороне CGI
+
+
+
+   После index.cgi у тебя уже есть user_id, role и fio в сессии.
+    Здесь в topbar нужно подставить:
+       - role (строка: "Администратор")
+       - fio  (ФИО пользователя)
+
+    Что должен делать schedule.cgi:
+      1. Определить что зашёл администратор (role=admin).
+      2. Сделать SELECT из БД по урокам
+      3. Считать строки в массив структур.
+      4. Сгруппировать по (day, lesson_num) — это одна группа.
+      5. Для группы посчитать rowspan = количество строк (классов) в этой группе.
+      6. Для первой строки группы выводить:
+              <td rowspan="N">День</td>
+              <td rowspan="N">№ урока</td>
+         а для остальных строк группы эти ячейки НЕ выводить.
+      7. Вернуть ТОЛЬКО <tr>...</tr> строки — таблица уже есть на странице.
+
+      +для выхода
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Главная — Администратор</title>
+
+    <style>
+        /* Общий фон страницы */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* --- Центральный контейнер всей страницы --- */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя панель: название + ФИО */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            overflow: hidden;
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        /* Кнопка выхода в верхней панели */
+        .logout-btn {
+            padding: 8px 14px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: bold;
+            white-space: nowrap;
+            margin-right: 30px;
+        }
+
+        .logout-btn:hover {
+            background: #f0d1f0;
+        }
+
+        /* Основной контейнер */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Кнопка перехода в режим редактирования */
+        .edit-btn {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 14px;
+            cursor: pointer;
+        }
+
+        .edit-btn:hover {
+            background: #770f77;
+        }
+
+        /* Кнопки вкладок (оповещения, списки пользователей) */
+        .notif-tab-btn {
+            padding: 8px 14px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .notif-tab-btn:hover {
+            background: #f0d1f0;
+        }
+
+        /* Отступ между кнопками */
+        .edit-btn,
+        .notif-tab-btn {
+            margin-right: 10px;
+        }
+
+        /* Контейнер таблицы */
+        .schedule-wrapper {
+            overflow-x: auto;
+        }
+
+        /* Таблица расписания */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+            font-size: 14px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        /* Колонки с фиксированными стилями */
+        .day-col {
+            width: 110px;
+            font-weight: bold;
+            color: #660066;
+        }
+
+        .lesson-col {
+            width: 70px;
+            font-weight: bold;
+        }
+
+        .class-col {
+            width: 80px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+
+    <!-- Верхняя панель -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">Электронная школа — Панель администратора</div>
+
+            <div class="topbar-user">
+                Роль: <span id="user-role">Администратор</span>,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+
+        <button class="logout-btn" id="btn-logout">Выход</button>
+    </div>
+
+    <!-- Основной блок -->
+    <div class="content">
+
+        <div class="panel-title">Расписание всей школы</div>
+
+        <!-- Кнопки управления -->
+        <button class="edit-btn" id="btn-edit">Режим редактирования расписания</button>
+        <button class="notif-tab-btn" id="btn-notifications">Оповещения</button>
+        <button class="notif-tab-btn" id="btn-users">Списки пользователей</button>
+
+        <!-- Каркас таблицы расписания -->
+        <div class="schedule-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>День</th>
+                        <th>№ урока</th>
+                        <th>Класс</th>
+                        <th>Предмет</th>
+                        <th>Кабинет</th>
+                        <th>Учитель</th>
+                    </tr>
+                </thead>
+
+                <tbody id="schedule-body">
+                    <!-- наполняется из schedule.cgi -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    /* Переход на страницу редактирования */
+    function goToEdit() {
+        window.location.href = "schedule_edit.html";
+    }
+
+    /* Переход на страницу оповещений */
+    function goToNotifications() {
+        window.location.href = "notifications.html";
+    }
+
+    /* Переход на страницу списков пользователей */
+    function goToUsers() {
+        /* если у тебя CGI, можно сделать: "/cgi-bin/admin_users.cgi" */
+        window.location.href = "admin_users.html";
+    }
+
+    /* Загрузка роли и ФИО пользователя */
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById("user-role").textContent = data.role;
+                document.getElementById("user-fio").textContent = data.fio;
+            })
+            .catch(() => {
+                document.getElementById("user-role").textContent = "Администратор";
+                document.getElementById("user-fio").textContent = "Иванова Анна Алексеевна (тест)";
+            });
+    }
+
+    /* Выход из системы */
+    function logout() {
+        fetch("/cgi-bin/logout.cgi")
+            .then(() => {
+                window.location.href = "index.html";
+            })
+            .catch(() => {
+                window.location.href = "index.html";
+            });
+    }
+
+    /* Загрузка расписания */
+    function loadSchedule() {
+        fetch("/cgi-bin/schedule.cgi")
+            .then(res => res.text())
+            .then(html => {
+                document.getElementById("schedule-body").innerHTML = html;
+            })
+            .catch(() => {
+                document.getElementById("schedule-body").innerHTML =
+				//если что закккоментить, это заглушка
+
+                    '<tr>' +
+                        '<td class="day-col" rowspan="2">Понедельник</td>' +
+                        '<td class="lesson-col" rowspan="2">1</td>' +
+                        '<td class="class-col">5А</td>' +
+                        '<td>Математика</td>' +
+                        '<td>203</td>' +
+                        '<td>Иванов И.И.</td>' +
+                    '</tr>' +
+                    '<tr>' +
+                        '<td class="class-col">5Б</td>' +
+                        '<td>Русский язык</td>' +
+                        '<td>205</td>' +
+                        '<td>Петров П.П.</td>' +
+                    '</tr>';
+            });
+    }
+
+    /* Инициализация DOM, обработчики и загрузка данных */
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnEdit = document.getElementById("btn-edit");
+        const btnNotifications = document.getElementById("btn-notifications");
+        const btnUsers = document.getElementById("btn-users");
+        const btnLogout = document.getElementById("btn-logout");
+
+        if (btnEdit) {
+            btnEdit.addEventListener("click", goToEdit);
+        }
+
+        if (btnNotifications) {
+            btnNotifications.addEventListener("click", goToNotifications);
+        }
+
+        if (btnUsers) {
+            btnUsers.addEventListener("click", goToUsers);
+        }
+
+        if (btnLogout) {
+            btnLogout.addEventListener("click", logout);
+        }
+
+        loadUserInfo();
+        loadSchedule();
+    });
+</script>
+
+</body>
+</html>

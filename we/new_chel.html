@@ -1,0 +1,634 @@
+<!--
+    add_user.html — страница добавления нового пользователя (интерфейс администратора
+    в подсистеме «Электронная школа»).
+
+      • Показывает форму для создания нового пользователя (ученик / учитель / администратор).
+      • Собирает данные: ФИО, логин, e-mail, пароль, роль, класс/предмет, примечания.
+      • Отправляет данные методом POST на /cgi-bin/add_user.cgi
+        в формате application/x-www-form-urlencoded.
+      • Вход в систему уже выполнен через index.cgi.
+      • В сессии на сервере уже есть user_id, role, fio.
+      • Доступ сюда разрешён только при role = 'admin' (проверяется на стороне сервера).
+
+    Что дальше должен делать /cgi-bin/add_user.cgi (на сервере):
+      1) Проверить входные данные:
+         - заполненность обязательных полей (fullName, login, password, passwordRepeat, role);
+         - совпадают ли пароли (password == passwordRepeat);
+         - уникальность логина в таблице users.
+      2) Перевести role в формат БД:
+         'student' → 'STUDENT', 'teacher' → 'TEACHER', 'admin' → 'ADMIN'.
+      3) Обработать связанные сущности:
+         - для ученика: классы (studentClass / studentNewClass → таблица classes);
+         - для учителя: предметы (teacherSubject / teacherNewSubject → таблица subjects).
+      4) Создать запись в users:
+         login, full_name, email, role, password_hash (пароль только в виде хэша).
+      5) Создать профиль:
+         - students (для STUDENT, с привязкой к классу + studentNotes),
+         - teachers (для TEACHER, с должностью teacherPosition + teacher_subjects),
+         - admins (для ADMIN, с adminNotes).
+      6) Вернуть результат:
+         - 200/302 при успехе (можно сделать redirect на admin_users.html),
+         - 4xx/5xx при ошибках (логин занят, некорректные данные, ошибка БД и т.п.).
+
+
+      • HTML-файл отвечает только за интерфейс и базовую проверку на стороне браузера.
+      • Вся логика (права, БД, хеширование) живёт в CGI / БД.
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Электронная школа — Добавление пользователя</title>
+    <style>
+        /* Общие стили страницы: фон, базовый шрифт */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Центральный контейнер (карточка всей страницы) */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель (шапка) */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        /* Содержимое шапки: название + ФИО/роль администратора */
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        /* Основной контент: заголовок + форма */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Контейнер кнопок под формой */
+        .footer-buttons {
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* Основная фиолетовая кнопка (Сохранить) */
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        /* Второстепенные белые кнопки (Назад, Очистить) */
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        /* Внешний вид «выключенной» кнопки (если вдруг будет использоваться) */
+        .btn-disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        /* Красная рамка — подсветка ошибочного поля */
+        .field-error {
+            border: 2px solid #ff4d4d !important;
+        }
+
+        /* Переключатель роли (Ученик / Учитель / Администратор) */
+        .role-toggle {
+            display: inline-flex;
+            border-radius: 999px;
+            background: #f1e3f7;
+            padding: 3px;
+            margin-bottom: 18px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+        }
+
+        .role-btn {
+            padding: 6px 16px;
+            border-radius: 999px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 14px;
+            color: #660066;
+            white-space: nowrap;
+        }
+
+        .role-btn.active {
+            background: #cc10cc;
+            color: #ffffff;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+        }
+
+        .role-btn:not(.active):hover {
+            background: #f7e3f7;
+        }
+
+        /* Карточка с самой формой */
+        .user-form {
+            margin-top: 10px;
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+            padding: 16px 18px 18px 18px;
+        }
+
+        /* Одна «строка» формы */
+        .form-row {
+            margin-bottom: 12px;
+        }
+
+        .form-row label {
+            display: block;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        .form-row input,
+        .form-row select {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        /* Две колонки в одной строке формы (например, логин + e-mail) */
+        .form-row.two-cols {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        /* Серые пояснения под полями */
+        .form-note {
+            font-size: 12px;
+            color: #666;
+            margin-top: 2px;
+        }
+
+        /* Блок для вывода сообщения об ошибке/успехе под формой */
+        .form-message {
+            margin-top: 8px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+
+        /* Ролевые секции — по умолчанию скрыты, кроме активной */
+        .role-section {
+            display: none;
+        }
+
+        .role-section.active {
+            display: block;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="page-container">
+        <!-- Верхняя панель с названием и ФИО администратора -->
+        <div class="topbar">
+            <div class="topbar-left">
+                <div class="topbar-title">Электронная школа — Администрирование</div>
+                <div class="topbar-user">
+                    Роль: <span>Администратор</span>,
+                    Пользователь: <span>Иванов Иван Иванович</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Основной контент: заголовок + переключатель роли + форма -->
+        <div class="content">
+            <div class="panel-title">Добавление пользователя</div>
+
+            <!-- Переключатель роли пользователя (ученик / учитель / админ) -->
+            <div class="role-toggle" id="roleToggle">
+                <button type="button" class="role-btn active" data-role="student">Ученик</button>
+                <button type="button" class="role-btn" data-role="teacher">Учитель</button>
+                <button type="button" class="role-btn" data-role="admin">Администратор</button>
+            </div>
+
+            <!-- Форма создания пользователя, POST на /cgi-bin/add_user.cgi -->
+            <form
+                class="user-form"
+                id="userForm"
+                method="post"
+                action="/cgi-bin/add_user.cgi"
+            >
+                <!-- Общие поля для любой роли: ФИО, логин, e-mail -->
+                <div class="form-row">
+                    <label for="fullName">ФИО</label>
+                    <input type="text" id="fullName" name="fullName" placeholder="Введите полностью ФИО" required>
+                </div>
+
+                <div class="form-row two-cols">
+                    <div>
+                        <label for="login">Логин</label>
+                        <input type="text" id="login" name="login" placeholder="Логин для входа" required>
+                    </div>
+                    <div>
+                        <label for="email">E-mail (опционально)</label>
+                        <input type="email" id="email" name="email" placeholder="user@example.com">
+                    </div>
+                </div>
+
+                <!-- Пароль и его повтор; хеширование будет на сервере -->
+                <div class="form-row two-cols">
+                    <div>
+                        <label for="password">Пароль</label>
+                        <input type="password" id="password" name="password" required>
+                        <div class="form-note">Пароль будет захеширован на сервере (CGI/БД).</div>
+                    </div>
+                    <div>
+                        <label for="passwordRepeat">Повтор пароля</label>
+                        <input type="password" id="passwordRepeat" name="passwordRepeat" required>
+                    </div>
+                </div>
+
+                <!-- Скрытое поле с выбранной ролью ('student' / 'teacher' / 'admin') -->
+                <input type="hidden" id="roleField" name="role" value="student">
+
+                <!-- Блок полей для ученика -->
+                <div class="role-section active" data-role="student">
+                    <div class="form-row two-cols">
+                        <div>
+                            <label for="studentClass">Класс</label>
+                            <select id="studentClass" name="studentClass">
+                                <option value="">Выберите класс</option>
+                                <!-- Список классов подставляется из CGI / БД -->
+                                <option value="other">Другое (новый класс)</option>
+                            </select>
+                            <div class="form-note">
+                                Новый класс будет добавлен в БД на сервере.
+                            </div>
+                        </div>
+                        <div>
+                            <label for="studentNotes">Примечание (опционально)</label>
+                            <input type="text" id="studentNotes" name="studentNotes" placeholder="Например: ППЭ, особые условия...">
+                        </div>
+                    </div>
+
+                    <!-- Поле для нового класса, показывается только при выборе "Другое" -->
+                    <div class="form-row hidden" id="studentNewClassRow">
+                        <label for="studentNewClass">Новый класс</label>
+                        <input type="text" id="studentNewClass" name="studentNewClass" placeholder="Например: 4В">
+                    </div>
+                </div>
+
+                <!-- Блок полей для учителя -->
+                <div class="role-section" data-role="teacher">
+                    <div class="form-row">
+                        <label for="teacherSubjectSelect">Предмет</label>
+                        <select id="teacherSubjectSelect" name="teacherSubject">
+                            <option value="">Выберите предмет</option>
+                            <!-- Список предметов подставляется из CGI / БД -->
+                            <option value="other">Другое (новый предмет)</option>
+                        </select>
+                        <div class="form-note">
+                            Если предмета нет в списке — выберите «Другое» и впишите новый.
+                        </div>
+                    </div>
+
+                    <!-- Поле для нового предмета, видно только при выборе "Другое" -->
+                    <div class="form-row hidden" id="teacherNewSubjectRow">
+                        <label for="teacherNewSubject">Новый предмет</label>
+                        <input type="text" id="teacherNewSubject" name="teacherNewSubject" placeholder="Введите название нового предмета">
+                    </div>
+
+                    <div class="form-row">
+                        <label for="teacherPosition">Должность</label>
+                        <input type="text" id="teacherPosition" name="teacherPosition" placeholder="Учитель, классный руководитель...">
+                    </div>
+                </div>
+
+                <!-- Блок полей для администратора -->
+                <div class="role-section" data-role="admin">
+                    <div class="form-row">
+                        <label for="adminNotes">Примечание (опционально)</label>
+                        <input type="text" id="adminNotes" name="adminNotes" placeholder="Например: ответственный за расписание">
+                    </div>
+                </div>
+
+                <!-- Сообщение об ошибке/успехе работы формы -->
+                <div class="form-message" id="formMessage"></div>
+
+                <!-- Кнопки управления: назад, сброс, сохранить -->
+                <div class="footer-buttons">
+                    <button type="button" class="btn-secondary" id="backBtn">Назад к пользователям</button>
+                    <button type="button" class="btn-secondary" id="resetFormBtn">Очистить форму</button>
+                    <button type="submit" class="btn-primary" id="submitFormBtn">Сохранить</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        /*
+            Логика страницы:
+              - переключение ролей и показ нужных блоков,
+              - загрузка классов/предметов,
+              - простая валидация,
+              - отправка формы на CGI.
+        */
+        (function () {
+            // Переключатель роли и соответствующие секции формы
+            var roleButtons = document.querySelectorAll('.role-btn');
+            var roleSections = document.querySelectorAll('.role-section');
+            var roleField = document.getElementById('roleField');
+
+            // Форма и служебные элементы
+            var form = document.getElementById('userForm');
+            var formMessage = document.getElementById('formMessage');
+            var resetBtn = document.getElementById('resetFormBtn');
+            var backBtn = document.getElementById('backBtn');
+
+            // Пароль и его повтор
+            var password = document.getElementById('password');
+            var passwordRepeat = document.getElementById('passwordRepeat');
+
+            // Поля для ученика (класс)
+            var studentClassSelect = document.getElementById('studentClass');
+            var studentNewClassRow = document.getElementById('studentNewClassRow');
+            var studentNewClassInput = document.getElementById('studentNewClass');
+
+            // Поля для учителя (предмет)
+            var teacherSubjectSelect = document.getElementById('teacherSubjectSelect');
+            var teacherNewSubjectRow = document.getElementById('teacherNewSubjectRow');
+            var teacherNewSubjectInput = document.getElementById('teacherNewSubject');
+
+            // Подгрузка списка классов из /cgi-bin/refs.cgi?type=classes
+            function loadClasses() {
+                fetch('/cgi-bin/refs.cgi?type=classes')
+                    .then(function (res) {
+                        if (!res.ok) {
+                            throw new Error('HTTP ' + res.status);
+                        }
+                        return res.json();
+                    })
+                    .then(function (data) {
+                        if (!Array.isArray(data)) return;
+
+                        var placeholder = studentClassSelect.querySelector('option[value=""]');
+                        var otherOption = studentClassSelect.querySelector('option[value="other"]');
+
+                        studentClassSelect.innerHTML = '';
+                        if (placeholder) studentClassSelect.appendChild(placeholder);
+
+                        data.forEach(function (name) {
+                            var opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = name;
+                            studentClassSelect.appendChild(opt);
+                        });
+
+                        if (otherOption) studentClassSelect.appendChild(otherOption);
+                    })
+                    .catch(function () {
+                        // Если справочник не загрузился — остаётся вариант "Другое"
+                    });
+            }
+
+            // Подгрузка списка предметов из /cgi-bin/refs.cgi?type=subjects
+            function loadSubjects() {
+                fetch('/cgi-bin/refs.cgi?type=subjects')
+                    .then(function (res) {
+                        if (!res.ok) {
+                            throw new Error('HTTP ' + res.status);
+                        }
+                        return res.json();
+                    })
+                    .then(function (data) {
+                        if (!Array.isArray(data)) return;
+
+                        var placeholder = teacherSubjectSelect.querySelector('option[value=""]');
+                        var otherOption = teacherSubjectSelect.querySelector('option[value="other"]');
+
+                        teacherSubjectSelect.innerHTML = '';
+                        if (placeholder) teacherSubjectSelect.appendChild(placeholder);
+
+                        data.forEach(function (name) {
+                            var opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = name;
+                            teacherSubjectSelect.appendChild(opt);
+                        });
+
+                        if (otherOption) teacherSubjectSelect.appendChild(otherOption);
+                    })
+                    .catch(function () {
+                        // Аналогично: при ошибке можно ввести предмет вручную
+                    });
+            }
+
+            // Переключение роли и показ нужной секции
+            roleButtons.forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    var role = btn.getAttribute('data-role');
+
+                    roleButtons.forEach(function (b) {
+                        b.classList.remove('active');
+                    });
+                    btn.classList.add('active');
+
+                    roleSections.forEach(function (section) {
+                        if (section.getAttribute('data-role') === role) {
+                            section.classList.add('active');
+                        } else {
+                            section.classList.remove('active');
+                        }
+                    });
+
+                    roleField.value = role;
+                    formMessage.textContent = '';
+                    formMessage.style.color = '#cc0000';
+                });
+            });
+
+            // Показ/скрытие поля "Новый класс"
+            studentClassSelect.addEventListener('change', function () {
+                if (studentClassSelect.value === 'other') {
+                    studentNewClassRow.classList.remove('hidden');
+                } else {
+                    studentNewClassRow.classList.add('hidden');
+                    studentNewClassInput.value = '';
+                }
+            });
+
+            // Показ/скрытие поля "Новый предмет"
+            teacherSubjectSelect.addEventListener('change', function () {
+                if (teacherSubjectSelect.value === 'other') {
+                    teacherNewSubjectRow.classList.remove('hidden');
+                } else {
+                    teacherNewSubjectRow.classList.add('hidden');
+                    teacherNewSubjectInput.value = '';
+                }
+            });
+
+            // Обработка отправки формы
+            form.addEventListener('submit', function (e) {
+                e.preventDefault();
+
+                password.classList.remove('field-error');
+                passwordRepeat.classList.remove('field-error');
+                formMessage.textContent = '';
+                formMessage.style.color = '#cc0000';
+
+                // Проверка совпадения паролей
+                if (password.value !== passwordRepeat.value) {
+                    password.classList.add('field-error');
+                    passwordRepeat.classList.add('field-error');
+                    formMessage.textContent = 'Пароли не совпадают.';
+                    return;
+                }
+
+                var activeRoleBtn = document.querySelector('.role-btn.active');
+                var currentRole = activeRoleBtn ? activeRoleBtn.getAttribute('data-role') : 'student';
+
+                // Доп. проверка для ученика
+                if (currentRole === 'student') {
+                    if (!studentClassSelect.value) {
+                        formMessage.textContent = 'Выберите класс или укажите новый.';
+                        return;
+                    }
+                    if (studentClassSelect.value === 'other' && !studentNewClassInput.value.trim()) {
+                        formMessage.textContent = 'Введите название нового класса.';
+                        return;
+                    }
+                }
+
+                // Доп. проверка для учителя
+                if (currentRole === 'teacher') {
+                    if (!teacherSubjectSelect.value) {
+                        formMessage.textContent = 'Выберите предмет для учителя.';
+                        return;
+                    }
+                    if (teacherSubjectSelect.value === 'other' && !teacherNewSubjectInput.value.trim()) {
+                        formMessage.textContent = 'Введите название нового предмета.';
+                        return;
+                    }
+                }
+
+                // Сбор данных формы в формат x-www-form-urlencoded
+                var formData = new FormData(form);
+                var params = new URLSearchParams();
+                formData.forEach(function (value, key) {
+                    params.append(key, value);
+                });
+
+                fetch(form.action, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: params.toString()
+                })
+                    .then(function (res) {
+                        if (res.ok) {
+                            formMessage.style.color = '#007700';
+                            formMessage.textContent = 'Пользователь успешно сохранён.';
+                        } else {
+                            formMessage.style.color = '#cc0000';
+                            formMessage.textContent = 'Ошибка: сервер вернул статус ' + res.status + '.';
+                        }
+                    })
+                    .catch(function () {
+                        formMessage.style.color = '#cc0000';
+                        formMessage.textContent = 'Ошибка при обращении к серверу.';
+                    });
+            });
+
+            // Кнопка "Очистить форму"
+            resetBtn.addEventListener('click', function () {
+                form.reset();
+                formMessage.textContent = '';
+                password.classList.remove('field-error');
+                passwordRepeat.classList.remove('field-error');
+
+                studentNewClassRow.classList.add('hidden');
+                studentNewClassInput.value = '';
+
+                teacherNewSubjectRow.classList.add('hidden');
+                teacherNewSubjectInput.value = '';
+            });
+
+            // Кнопка "Назад к пользователям"
+            backBtn.addEventListener('click', function () {
+                if (confirm('Выйти на список пользователей? Несохранённые данные могут быть потеряны.')) {
+                    window.location.href = 'admin_users.html';
+                }
+            });
+
+            // Инициализация: подгружаем классы и предметы
+            loadClasses();
+            loadSubjects();
+        })();
+    </script>
+</body>
+</html>
+

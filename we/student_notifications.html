@@ -1,0 +1,396 @@
+<!--
+    ОПОВЕЩЕНИЯ ДЛЯ УЧЕНИКА (ТОЛЬКО ПРОСМОТР)
+
+    Используем ту же таблицу notifications, что и для админа/учителя.
+
+    notifications:
+      id
+      from_text
+      title
+      text
+      datetime
+      audience_type   -- "school" | "teachers" | "classes" | "class" | "custom"
+      audience_value  -- для "class": "5А"
+      to_text
+      created_by
+      ...
+
+    1) /cgi-bin/profile.cgi (GET)
+       • Определить текущего пользователя по сессии.
+       • Проверить, что он "student".
+       • Вернуть JSON:
+         {
+           "user_id":   123,
+           "fio":       "Петров Иван Иванович",
+           "role":      "Ученик",
+           "role_code": "student",
+           "class_name":"7Б"
+         }
+       • Если сессии нет/роль не student — 401/ошибка.
+
+    2) /cgi-bin/notifications_list.cgi (GET)
+       • CGI по сессии знает:
+           role_code  = 'student'
+           class_name = "7Б"
+       • Внутри CGI фильтруем записи в notifications:
+           - audience_type = 'school'   → видно всем
+           - audience_type = 'classes'  → видно всем классам
+           - audience_type = 'class'    → только ученикам этого класса
+                 (audience_value = class_name ученика)
+           - audience_type = 'teachers' → обычно НЕ показываем ученикам
+               (можно просто не включать такие записи в результат)
+           - audience_type = 'custom'   - сами пишем кому хотим (увидят все, просто в to будет указано кому посвещаем
+
+       • Вернуть JSON (без editable, только для чтения):
+         {
+           "notifications": [
+             {
+               "id": 1,
+               "from": "Администрация школы",   -- берём из from_text
+               "to": "Вся школа",               -- берём из to_text
+               "datetime": "2025-09-01 09:00",
+               "title": "Линейка 1 сентября",
+               "text": "Приглашаем всех...",
+               "audience_type": "school",
+               "audience_value": ""
+             },
+             ...
+           ]
+         }
+
+       • Ничего редактировать/удалять ученик не может, поэтому
+         никаких полей editable и т.п. не требуется.
+
+   НЕ доверять данным с клиента. Кого и что показывать — решает только CGI, опираясь на сессию и базу.
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Оповещения — Ученик</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель с заголовком и ФИО ученика */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        .controls {
+            margin-bottom: 16px;
+        }
+
+        /* Обёртка для таблицы оповещений (на случай горизонтального скролла) */
+        .notif-wrapper {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        /* Ограничиваем ширину ячейки с текстом, чтобы таблица не "растягивалась" */
+        .text-cell {
+            max-width: 260px;
+        }
+
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <!-- Верхняя панель: название раздела + краткая информация об ученике -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Оповещения
+            </div>
+            <div class="topbar-user">
+                Ученик: <span id="user-fio">ФИО</span>,
+                Класс: <span id="user-class">5А</span>
+            </div>
+        </div>
+
+        <!-- Кнопка возвращения в главное меню ученика -->
+        <button class="btn-secondary" id="btn-back">На главную</button>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Оповещения</div>
+
+        <!-- Панель управления: пока только кнопка "Обновить" -->
+        <div class="controls">
+            <button class="btn-secondary" id="btn-reload">Обновить список</button>
+        </div>
+
+        <!-- Сообщения страницы (ошибки/инфо) -->
+        <div class="page-message" id="page-message"></div>
+
+        <!-- Таблица с оповещениями (только просмотр, без редактирования) -->
+        <div class="notif-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>От кого</th>
+                        <th>Кому</th>
+                        <th>Дата и время</th>
+                        <th>Заголовок</th>
+                        <th>Текст</th>
+                    </tr>
+                </thead>
+                <tbody id="notif-body">
+                    <!-- строки оповещений создаются динамически в JS -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Данные о текущем пользователе (заполняются из profile.cgi)
+    const currentUser = {
+        userId: null,
+        fio: "",
+        className: "",
+        roleCode: "student"
+    };
+
+    // Загрузка профиля ученика из /cgi-bin/profile.cgi.
+    // Если CGI ещё не реализован — используется тестовая заглушка.
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId    = data.user_id || null;
+                currentUser.fio       = data.fio || "";
+                currentUser.className = data.class_name || "";
+                currentUser.roleCode  = data.role_code || "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio || "ФИО (тест)";
+                document.getElementById("user-class").textContent = currentUser.className || "5А";
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если profile.cgi ещё нет или не отвечает
+                currentUser.userId    = 100;
+                currentUser.fio       = "Тестовый Ученик";
+                currentUser.className = "7Б";
+                currentUser.roleCode  = "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio;
+                document.getElementById("user-class").textContent = currentUser.className;
+            });
+    }
+
+    // Загрузка списка оповещений для ТЕКУЩЕГО ученика.
+    // Бэкенд сам фильтрует, какие записи ученик имеет право видеть,
+    // исходя из его роли и класса (по сессии).
+    function loadNotifications() {
+        const tbody = document.getElementById("notif-body");
+        const pageMessage = document.getElementById("page-message");
+
+        tbody.innerHTML = "";
+        pageMessage.textContent = "";
+
+        fetch("/cgi-bin/notifications_list.cgi")
+            .then(res => res.json())
+            .then(data => {
+                // Поддерживаем оба варианта ответа:
+                //   1) просто массив []
+                //   2) объект { notifications:[...] }
+                const list = Array.isArray(data) ? data : (data.notifications || []);
+
+                // Если оповещений нет — показываем одну "пустую" строку
+                if (!list.length) {
+                    const tr = document.createElement("tr");
+                    const td = document.createElement("td");
+                    td.colSpan = 5;
+                    td.textContent = "Оповещения отсутствуют.";
+                    tr.appendChild(td);
+                    tbody.appendChild(tr);
+                    return;
+                }
+
+                // Строим строки таблицы по каждому оповещению
+                list.forEach(item => {
+                    const tr = document.createElement("tr");
+
+                    const tdFrom = document.createElement("td");
+                    tdFrom.textContent = item.from || "";
+                    tr.appendChild(tdFrom);
+
+                    const tdTo = document.createElement("td");
+                    tdTo.textContent = item.to || "";
+                    tr.appendChild(tdTo);
+
+                    const tdDatetime = document.createElement("td");
+                    tdDatetime.textContent = item.datetime || "";
+                    tr.appendChild(tdDatetime);
+
+                    const tdTitle = document.createElement("td");
+                    tdTitle.textContent = item.title || "";
+                    tr.appendChild(tdTitle);
+
+                    const tdText = document.createElement("td");
+                    tdText.className = "text-cell";
+                    tdText.textContent = item.text || "";
+                    tr.appendChild(tdText);
+
+                    tbody.appendChild(tr);
+                });
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если notifications_list.cgi ещё не реализован
+                const stub = [
+                    {
+                        from: "Администрация школы",
+                        to: "Вся школа",
+                        datetime: "2025-09-01 09:00",
+                        title: "Линейка 1 сентября",
+                        text: "Приглашаем всех..."
+                    }
+                ];
+
+                stub.forEach(item => {
+                    const tr = document.createElement("tr");
+
+                    const tdFrom = document.createElement("td");
+                    tdFrom.textContent = item.from;
+                    tr.appendChild(tdFrom);
+
+                    const tdTo = document.createElement("td");
+                    tdTo.textContent = item.to;
+                    tr.appendChild(tdTo);
+
+                    const tdDatetime = document.createElement("td");
+                    tdDatetime.textContent = item.datetime;
+                    tr.appendChild(tdDatetime);
+
+                    const tdTitle = document.createElement("td");
+                    tdTitle.textContent = item.title;
+                    tr.appendChild(tdTitle);
+
+                    const tdText = document.createElement("td");
+                    tdText.className = "text-cell";
+                    tdText.textContent = item.text;
+                    tr.appendChild(tdText);
+
+                    tbody.appendChild(tr);
+                });
+            });
+    }
+
+    // Инициализация страницы: навешиваем обработчики и загружаем данные
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnBack   = document.getElementById("btn-back");
+        const btnReload = document.getElementById("btn-reload");
+
+        // Кнопка "На главную" → переход к меню ученика
+        if (btnBack) {
+            btnBack.addEventListener("click", () => {
+                window.location.href = "student_menu.html";
+            });
+        }
+
+        // Кнопка "Обновить список" → повторная загрузка оповещений
+        if (btnReload) {
+            btnReload.addEventListener("click", loadNotifications);
+        }
+
+        // Стартовая загрузка
+        loadUserInfo();       // загружаем ФИО и класс ученика
+        loadNotifications();  // подгружаем список оповещений
+    });
+</script>
+
+</body>
+</html>

@@ -1,0 +1,539 @@
+<!--
+    ПРОСМОТР КОНКРЕТНОГО ДЗ УЧЕНИКОМ + ПРИКРЕПЛЕНИЕ ФАЙЛА
+
+    1) /cgi-bin/student_homework_detail.cgi?homework_id=XXX (GET)
+       CGI по сессии знает student_id, поэтому:
+         - проверяет, что данное ДЗ относится к этому ученику/классу
+         - достаёт ДЗ из homework
+         - достаёт файлы учителя из homework_files
+         - достаёт отправленное решение ученика (если есть) из homework_submissions
+
+       ОТДАЁТ:
+       {
+         "ok": true,
+         "homework": {
+           "id":         10,
+           "subject":    "Математика",
+           "teacher":    "Иванов И.И.",
+           "title":      "Упр. 1-10",
+           "description":"Сделать задачи 1-10 со страницы 15",
+           "deadline":   "2025-09-05T23:59",
+
+           "teacher_files": [
+             { "name": "Задачи.pdf", "url": "/files/hw/10/tasks.pdf" }
+           ],
+
+           "status":        "submitted",     
+           "status_text":   "Отправлено, ожидает проверки",
+           "grade":         null,
+           "teacher_comment":"Проверь решение задачи №3",
+           "checked_at":    null,
+
+           "student_submission": {
+             "file_name":   "Решение_Петров.pdf",
+             "file_url":    "/files/submissions/100_10.pdf",
+             "submitted_at":"2025-09-03T20:10"
+           },
+
+           "can_upload": true,   // можно ли прикрепить/перезаписать файл
+           "can_delete": true    // можно ли удалить свою отправку
+         }
+       }
+
+
+1) status = "accepted"  (ДЗ ПРИНЯТО)
+   - Ученик НЕ может прикреплять новые файлы.
+   - Ученик НЕ может редактировать/перезаписывать уже прикреплённый файл.
+   - Ученик НЕ может удалять свою отправку.
+   - CGI в student_homework_detail.cgi должен возвращать:
+       "can_upload": false,
+       "can_delete": false
+   - В student_homework_upload.cgi и student_homework_delete_submission.cgi
+     при любой попытке изменения возвращать что то типа{ ok:false, message:"Работа уже принята, редактирование запрещено." }.
+
+2) status = "rejected"  (ДЗ ОТКЛОНЕНО, нужно переделать)
+   - Ученик МОЖЕТ отправить новый файл (пересдать работу).
+   - Удалять старую отправку НЕ нужно (история проверок должна сохраняться),
+     поэтому удаление файла запрещаем.
+   - CGI должен возвращать:
+       "can_upload": true,
+       "can_delete": false
+   - upload.cgi разрешает INSERT/UPDATE, delete_submission.cgi возвращает ошибку:
+       { ok:false, message:"Удаление отправки запрещено, можно только отправить новую версию." }.
+
+3) status = "submitted"  (отправлено, но ещё не проверено)
+   - Ученик МОЖЕТ обновлять свою отправку (перезаливать файл).
+   - Ученик МОЖЕТ удалить свою текущую отправку до проверки.
+   - CGI должен возвращать:
+       "can_upload": true,
+       "can_delete": true
+   - upload.cgi позволяет INSERT/UPDATE, delete_submission.cgi позволяет удаление записи/файла.
+
+4) status = "assigned"  (задание выдано, но ещё ничего не отправлено)
+   - Ученик может прикрепить файл первый раз.
+   - Удалять нечего, но логически:
+       "can_upload": true,
+       "can_delete": false
+   - upload.cgi разрешает первую отправку, delete_submission.cgi возвращает ошибку, если вызывать без отправки.
+
+ИТОГО:
+  • ВСЕ реальные проверки статуса и прав выполняются на бэке.
+  • Фронт только показывает/скрывает кнопки по флагам "can_upload"/"can_delete"
+    и честно отрабатывает ответы { ok:false, message:"..." } от CGI.
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Домашнее задание — Ученик</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        .page-container {
+            max-width: 800px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .btn-secondary,
+        .btn-primary,
+        .btn-danger {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            border: none;
+        }
+
+        .btn-secondary {
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        .btn-primary {
+            background: #cc10cc;
+            color: #ffffff;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-danger {
+            background: #ff4d4d;
+            color: #ffffff;
+        }
+
+        .btn-danger:hover {
+            background: #cc0000;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        .field-label {
+            font-weight: bold;
+        }
+
+        .info-block {
+            margin-bottom: 12px;
+        }
+
+        .info-block p {
+            margin: 4px 0;
+        }
+
+        .files-list {
+            margin: 4px 0 10px 0;
+            padding-left: 20px;
+        }
+
+        .files-list li {
+            margin-bottom: 4px;
+        }
+
+        .upload-block {
+            margin-top: 14px;
+            padding: 10px 12px;
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+        }
+
+        .upload-block input[type="file"] {
+            margin-top: 6px;
+        }
+
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+
+        .footer-buttons {
+            margin-top: 18px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <div class="topbar">
+        <div class="topbar-title">Домашнее задание</div>
+        <!-- кнопка возврата к списку ДЗ -->
+        <button class="btn-secondary" id="btn-back">К списку</button>
+    </div>
+
+    <div class="content">
+        <!-- заголовок ДЗ (тема) -->
+        <div class="panel-title" id="hw-title">Загрузка...</div>
+
+        <!-- основные поля по ДЗ -->
+        <div class="info-block">
+            <p><span class="field-label">Предмет:</span> <span id="hw-subject"></span></p>
+            <p><span class="field-label">Учитель:</span> <span id="hw-teacher"></span></p>
+            <p><span class="field-label">Дедлайн:</span> <span id="hw-deadline"></span></p>
+            <p><span class="field-label">Статус:</span> <span id="hw-status"></span></p>
+            <p><span class="field-label">Оценка:</span> <span id="hw-grade"></span></p>
+        </div>
+
+        <!-- описание задания -->
+        <div class="info-block">
+            <p class="field-label">Описание:</p>
+            <p id="hw-description"></p>
+        </div>
+
+        <!-- файлы, которые прикрепил учитель -->
+        <div class="info-block">
+            <p class="field-label">Файлы от учителя:</p>
+            <ul class="files-list" id="hw-teacher-files">
+                <!-- файлы -->
+            </ul>
+        </div>
+
+        <!-- блок с инфой о решении ученика -->
+        <div class="info-block">
+            <p class="field-label">Ваше решение:</p>
+            <div id="hw-student-submission"></div>
+        </div>
+
+        <!-- форма прикрепления/обновления файла ученика
+             Показывается только если can_upload = true (решает бэк) -->
+        <div class="upload-block" id="upload-block">
+            <p class="field-label">Прикрепить/обновить файл решения:</p>
+            <input type="file" id="file-input">
+            <div class="footer-buttons" style="justify-content:flex-start; margin-top:10px;">
+                <button class="btn-primary" id="btn-upload">Сохранить файл</button>
+                <!-- кнопка удаления показывается только если can_delete = true и файл уже есть -->
+                <button class="btn-danger" id="btn-delete-submission" style="display:none;">Удалить мой файл</button>
+            </div>
+        </div>
+
+        <div class="page-message" id="page-message"></div>
+
+        <div class="footer-buttons">
+            <button class="btn-secondary" id="btn-exit">К списку</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ID текущего ДЗ из query-параметра + данные, полученные от CGI
+    let currentHomeworkId = null;
+    let currentHomeworkData = null;
+
+    // утилита: достаём параметр из строки запроса (?homework_id=...)
+    function getQueryParam(name) {
+        const params = new URLSearchParams(window.location.search);
+        return params.get(name);
+    }
+
+    // загрузка деталей ДЗ с бэка
+    function loadHomeworkDetail() {
+        const pageMessage = document.getElementById("page-message");
+        pageMessage.textContent = "";
+
+        const hwId = getQueryParam("homework_id");
+        if (!hwId) {
+            pageMessage.textContent = "Не передан идентификатор домашнего задания.";
+            return;
+        }
+        currentHomeworkId = hwId;
+
+        // фронт просто запрашивает CGI, всё про права/статусы решает бэк
+        fetch(`/cgi-bin/student_homework_detail.cgi?homework_id=${encodeURIComponent(hwId)}`)
+            .then(res => res.json())
+            .then(data => {
+                if (!data.ok) {
+                    pageMessage.textContent = data.message || "Ошибка загрузки домашнего задания.";
+                    return;
+                }
+                // сохраняем полученные данные и отрисовываем
+                currentHomeworkData = data.homework;
+                renderHomeworkDetail();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА на случай отсутствия CGI
+                currentHomeworkData = {
+                    id: hwId,
+                    subject: "Математика",
+                    teacher: "Иванов И.И.",
+                    title: "Упр. 1-10",
+                    description: "Решить задачи 1-10 со страницы 15.",
+                    deadline: "2025-09-05T23:59",
+                    teacher_files: [
+                        { name: "Задачи.pdf", url: "#" }
+                    ],
+                    status: "submitted",
+                    status_text: "Отправлено, ожидает проверки",
+                    grade: null,
+                    teacher_comment: "",
+                    checked_at: null,
+                    student_submission: {
+                        file_name: "Решение_Петров.pdf",
+                        file_url: "#",
+                        submitted_at: "2025-09-03 20:10"
+                    },
+                    // в реальной жизни эти флаги выставляет бэк
+                    can_upload: true,
+                    can_delete: true
+                };
+                renderHomeworkDetail();
+            });
+    }
+
+    // отрисовка данных ДЗ на странице
+    function renderHomeworkDetail() {
+        if (!currentHomeworkData) return;
+
+        document.getElementById("hw-title").textContent       = currentHomeworkData.title || "Домашнее задание";
+        document.getElementById("hw-subject").textContent     = currentHomeworkData.subject || "";
+        document.getElementById("hw-teacher").textContent     = currentHomeworkData.teacher || "";
+        document.getElementById("hw-deadline").textContent    = currentHomeworkData.deadline || "";
+        document.getElementById("hw-status").textContent      = currentHomeworkData.status_text || currentHomeworkData.status || "";
+        document.getElementById("hw-grade").textContent       = (currentHomeworkData.grade != null ? currentHomeworkData.grade : "");
+
+        document.getElementById("hw-description").textContent = currentHomeworkData.description || "";
+
+        // список файлов учителя
+        const filesUl = document.getElementById("hw-teacher-files");
+        filesUl.innerHTML = "";
+        const teacherFiles = currentHomeworkData.teacher_files || [];
+        if (!teacherFiles.length) {
+            const li = document.createElement("li");
+            li.textContent = "Файлы не прикреплены.";
+            filesUl.appendChild(li);
+        } else {
+            teacherFiles.forEach(f => {
+                const li = document.createElement("li");
+                const a  = document.createElement("a");
+                a.href = f.url || "#";
+                a.textContent = f.name || "Файл";
+                a.target = "_blank";
+                li.appendChild(a);
+                filesUl.appendChild(li);
+            });
+        }
+
+        // блок "Ваше решение"
+        const studentDiv = document.getElementById("hw-student-submission");
+        studentDiv.innerHTML = "";
+        const sub = currentHomeworkData.student_submission;
+        if (sub && sub.file_name) {
+            const p1 = document.createElement("p");
+            const a  = document.createElement("a");
+            a.href = sub.file_url || "#";
+            a.textContent = sub.file_name;
+            a.target = "_blank";
+            p1.textContent = "Прикреплённый файл: ";
+            p1.appendChild(a);
+            studentDiv.appendChild(p1);
+
+            if (sub.submitted_at) {
+                const p2 = document.createElement("p");
+                p2.textContent = "Дата отправки: " + sub.submitted_at;
+                studentDiv.appendChild(p2);
+            }
+        } else {
+            const p = document.createElement("p");
+            p.textContent = "Файл ещё не отправлен.";
+            studentDiv.appendChild(p);
+        }
+
+        const uploadBlock = document.getElementById("upload-block");
+        const btnDelete   = document.getElementById("btn-delete-submission");
+
+        // показываем/прячем блок загрузки по флагу, который пришёл с бэка
+        // если ДЗ принято, бэк должен вернуть can_upload:false → блок скрыт
+        if (currentHomeworkData.can_upload) {
+            uploadBlock.style.display = "block";
+        } else {
+            uploadBlock.style.display = "none";
+        }
+
+        // кнопка удаления отображается только если бэк разрешил (can_delete)
+        // и у ученика уже есть прикреплённый файл
+        if (currentHomeworkData.can_delete &&
+            currentHomeworkData.student_submission &&
+            currentHomeworkData.student_submission.file_name) {
+            btnDelete.style.display = "inline-block";
+        } else {
+            btnDelete.style.display = "none";
+        }
+    }
+
+    // отправка файла решения ученика
+    function uploadFile() {
+        const pageMessage = document.getElementById("page-message");
+        pageMessage.textContent = "";
+
+        if (!currentHomeworkId) return;
+
+        const fileInput = document.getElementById("file-input");
+        if (!fileInput.files || !fileInput.files.length) {
+            pageMessage.textContent = "Выберите файл для загрузки.";
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("homework_id", currentHomeworkId);
+        formData.append("file", fileInput.files[0]);
+
+        // на бэке ещё раз проверяется:
+        //  - что студент имеет право на это ДЗ
+        //  - что статус ДЗ позволяет загрузку (например, status != 'accepted')
+        fetch("/cgi-bin/student_homework_upload.cgi", {
+            method: "POST",
+            body: formData
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Файл отправлен.");
+                    // после успешной загрузки заново тянем детали, чтобы обновить статус/флаги
+                    loadHomeworkDetail();
+                } else {
+                    pageMessage.textContent = data.message || "Ошибка загрузки файла.";
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                alert("Загрузка (заглушка): считаем, что всё успешно.");
+                loadHomeworkDetail();
+            });
+    }
+
+    // удаление отправленного файла (если бэк разрешил can_delete)
+    function deleteSubmission() {
+        const pageMessage = document.getElementById("page-message");
+        pageMessage.textContent = "";
+
+        if (!currentHomeworkId) return;
+        if (!confirm("Удалить отправленный файл?")) return;
+
+        const payload = { homework_id: currentHomeworkId };
+
+        // бэк обязан проверить:
+        //  - что студент владелец этой отправки
+        //  - что статус ещё позволяет удаление (например, status != 'accepted')
+        fetch("/cgi-bin/student_homework_delete_submission.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Файл удалён.");
+                    loadHomeworkDetail();
+                } else {
+                    pageMessage.textContent = data.message || "Ошибка удаления файла.";
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА
+                alert("Удаление (заглушка): считаем, что всё успешно.");
+                loadHomeworkDetail();
+            });
+    }
+
+    // инициализация обработчиков и первичная загрузка данных
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnBack   = document.getElementById("btn-back");
+        const btnExit   = document.getElementById("btn-exit");
+        const btnUpload = document.getElementById("btn-upload");
+        const btnDel    = document.getElementById("btn-delete-submission");
+
+        // оба перехода — просто назад к списку ДЗ
+        if (btnBack) {
+            btnBack.addEventListener("click", () => {
+                window.location.href = "student_homework.html";
+            });
+        }
+        if (btnExit) {
+            btnExit.addEventListener("click", () => {
+                window.location.href = "student_homework.html";
+            });
+        }
+
+        // отправка файла решения
+        if (btnUpload) {
+            btnUpload.addEventListener("click", uploadFile);
+        }
+
+        // удаление своей отправки
+        if (btnDel) {
+            btnDel.addEventListener("click", deleteSubmission);
+        }
+
+        // стартовая загрузка деталей ДЗ по homework_id из URL
+        loadHomeworkDetail();
+    });
+</script>
+
+</body>
+</html>

@@ -1,0 +1,562 @@
+<!--
+    TEACHER_MENU.HTML — ГЛАВНОЕ МЕНЮ УЧИТЕЛЯ
+
+    - показать расписание УРОКОВ учителя на выбранную дату (по умолчанию — сегодня);
+    - дать переходы:
+        * Домашние задания (all_homework.html)
+        * Материалы (material.html)
+        * Оповещения (notifications.html — отдельная страница, как у админа, но редактировать можно только свои записи)
+        * Журнал конкретного урока (lesson_journal.html?lesson_id=...)
+
+    ----------------------------------------
+    ТАБЛИЦЫ (примерная структура)
+    ----------------------------------------
+
+    users
+    -----
+      id         INTEGER PK
+      login      TEXT
+      fio        TEXT
+      role_code  TEXT   -- 'admin', 'teacher', 'student', ...
+
+    classes
+    -------
+      id          INTEGER PK
+      name        TEXT    -- "5А", "7Б", ...
+
+    lessons
+    -------
+      id          INTEGER PK            -- lesson_id
+      teacher_id  INTEGER FK -> users.id
+      class_id    INTEGER FK -> classes.id
+      subject     TEXT                  -- "Математика"
+      room        TEXT                  -- "203"
+      date        TEXT                  -- "YYYY-MM-DD"
+      lesson_num  INTEGER               -- номер урока в дне (1..7)
+
+
+    1) /cgi-bin/profile.cgi   (GET)
+       Определяет, под КЕМ зашли.
+
+       ОТДАЁТ JSON:
+       {
+         "user_id":   5,                   // users.id
+         "role":      "Учитель",           // человекочитаемое
+         "role_code": "teacher",           // машинное: 'teacher'/'admin'/...
+         "fio":       "Иванов Иван Иванович"
+       }
+
+       Страница ожидает, что role_code == 'teacher' 
+
+
+    2) /cgi-bin/teacher_schedule.cgi   (GET)
+       ВХОД:
+         Параметр date (обязательный), формат "YYYY-MM-DD".
+         Текущий пользователь — учитель (определяется по сессии внутри CGI).
+
+       ЛОГИКА:
+         current_user = по сессии
+         если current_user.role_code != 'teacher'  → ошибка/пусто
+
+       ОТДАЁТ JSON:
+       {
+         "date": "2025-12-01",
+         "lessons": [
+           {
+             "lesson_id": 123,
+             "lesson_num": 1,
+             "subject": "Математика",
+             "class_name": "5А",
+             "room": "203"
+           },
+           ...
+         ]
+       }
+
+       Если уроков нет → "lessons": [].
+
+
+    3) /cgi-bin/logout.cgi (GET) — опционально
+       Для выхода 
+       В текущем фронте при нажатии "Выход" можно либо:
+         - просто перейти на index.html (страница логина),
+         - либо дёрнуть /cgi-bin/logout.cgi, а затем index.html.
+
+    - Все уроки в расписании выбираются только по teacher_id = текущему user_id.
+
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Меню учителя</title>
+
+    <style>
+        /* Общие стили страницы, фон, базовый шрифт */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Центральный контейнер всей страницы (карточка) */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя панель (цветная полоска с названием и ФИО) */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        .topbar-right button {
+            margin-left: 10px;
+        }
+
+        /* Основной контент (под шапкой) */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Навигационные кнопки (дом.задания, материалы, оповещения) */
+        .nav-buttons {
+            margin-bottom: 16px;
+        }
+
+        .nav-buttons button {
+            margin-right: 10px;
+        }
+
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        /* Блок выбора даты в расписании */
+        .date-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .date-label {
+            font-size: 14px;
+            color: #333;
+        }
+
+        /* Таблица расписания уроков на выбранную дату */
+        .schedule-wrapper {
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        /* Кликабельная строка — переход в журнал урока */
+        .clickable-row {
+            cursor: pointer;
+        }
+
+        .clickable-row:hover td {
+            background: #f7e3f7;
+        }
+
+        /* Сообщение под таблицей (ошибки/нет уроков) */
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">Электронная школа — Меню учителя</div>
+            <div class="topbar-user">
+                Роль: <span id="user-role">Учитель</span>,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+        <div class="topbar-right">
+            <!-- Кнопка выхода: просто уводим пользователя на index.html (страница логина).
+                 При необходимости можно сначала дернуть /cgi-bin/logout.cgi. -->
+            <button class="btn-secondary" id="btn-logout">Выход</button>
+        </div>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Расписание и навигация</div>
+
+        <!-- Навигация по разделам учителя -->
+        <div class="nav-buttons">
+            <button class="btn-secondary" id="btn-homework">Домашние задания</button>
+            <button class="btn-secondary" id="btn-materials">Материалы</button>
+            <button class="btn-secondary" id="btn-notifications">Оповещения</button>
+        </div>
+
+        <!-- Переключение даты для расписания уроков учителя -->
+        <div class="date-controls">
+            <button class="btn-secondary" id="btn-prev-day">&lt;</button>
+            <div class="date-label">
+                Дата: <span id="current-date-text">---</span>
+            </div>
+            <button class="btn-secondary" id="btn-next-day">&gt;</button>
+            <button class="btn-secondary" id="btn-today">Сегодня</button>
+        </div>
+
+        <!-- Таблица с уроками на выбранную дату (каждая строка → к журналу урока) -->
+        <div class="schedule-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>№ урока</th>
+                        <th>Предмет</th>
+                        <th>Класс</th>
+                        <th>Кабинет</th>
+                    </tr>
+                </thead>
+                <tbody id="schedule-body">
+                    <!-- строки с уроками добавляются динамически из teacher_schedule.cgi -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="page-message" id="page-message"></div>
+    </div>
+</div>
+
+<script>
+
+    const currentUser = {
+        userId: null,
+        roleCode: "teacher",
+        fio: ""
+    };
+
+    // Текущая выбранная дата в формате YYYY-MM-DD (для teacher_schedule.cgi)
+    let currentDateStr = "";
+
+
+
+    // Загрузка профиля пользователя
+    // Использует /cgi-bin/profile.cgi
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId   = data.user_id || null;
+                currentUser.roleCode = data.role_code || "teacher";
+                currentUser.fio      = data.fio || "";
+
+                document.getElementById("user-role").textContent = data.role || "Учитель";
+                document.getElementById("user-fio").textContent  = data.fio || "Учитель (тест)";
+            })
+            .catch(() => {
+                // Заглушка, если profile.cgi ещё не реализован
+                currentUser.userId   = 5;
+                currentUser.roleCode = "teacher";
+                currentUser.fio      = "Иванов Иван Иванович (тест)";
+                document.getElementById("user-role").textContent = "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio;
+            });
+    }
+
+
+    // Работа с датами (отображение и формат для CGI)
+    function formatDateForLabel(dateObj) {
+        // Отображение для пользователя: ДД.ММ.ГГГГ
+        const y = dateObj.getFullYear();
+        const m = String(dateObj.getMonth() + 1).padStart(2, "0");
+        const d = String(dateObj.getDate()).padStart(2, "0");
+        return d + "." + m + "." + y;
+    }
+
+    function toYYYYMMDD(dateObj) {
+        // Формат для CGI: YYYY-MM-DD
+        const y = dateObj.getFullYear();
+        const m = String(dateObj.getMonth() + 1).padStart(2, "0");
+        const d = String(dateObj.getDate()).padStart(2, "0");
+        return y + "-" + m + "-" + d;
+    }
+
+    // Установить новую текущую дату и перезагрузить расписание
+    function setCurrentDate(dateObj) {
+        currentDateStr = toYYYYMMDD(dateObj);
+        document.getElementById("current-date-text").textContent = formatDateForLabel(dateObj);
+        loadScheduleForCurrentDate();
+    }
+
+    // Сдвиг текущей даты (на день вперёд/назад) и перезагрузка
+    function shiftCurrentDate(days) {
+        const parts = currentDateStr.split("-");
+        const baseDate = (parts.length === 3)
+            ? new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
+            : new Date();
+        baseDate.setDate(baseDate.getDate() + days);
+        setCurrentDate(baseDate);
+    }
+
+
+    // Загрузка расписания учителя на текущую дату
+    // Использует /cgi-bin/teacher_schedule.cgi?date=YYYY-MM-DD
+    function loadScheduleForCurrentDate() {
+        const tbody = document.getElementById("schedule-body");
+        const msg   = document.getElementById("page-message");
+
+        tbody.innerHTML = "";
+        msg.textContent = "";
+
+        if (!currentDateStr) return;
+
+        fetch("/cgi-bin/teacher_schedule.cgi?date=" + encodeURIComponent(currentDateStr))
+            .then(res => res.json())
+            .then(data => {
+                const lessons = data.lessons || [];
+
+                // Если уроков нет — одна строка-заглушка
+                if (!lessons.length) {
+                    const tr = document.createElement("tr");
+                    const td = document.createElement("td");
+                    td.colSpan = 4;
+                    td.textContent = "На эту дату уроков нет.";
+                    tr.appendChild(td);
+                    tbody.appendChild(tr);
+                    return;
+                }
+
+                // Для каждого урока строим строку, по клику → журнал урока
+                lessons.forEach(lesson => {
+                    const tr = document.createElement("tr");
+                    tr.className = "clickable-row";
+                    tr.dataset.id = lesson.lesson_id;
+
+                    const tdNum = document.createElement("td");
+                    tdNum.textContent = lesson.lesson_num;
+                    tr.appendChild(tdNum);
+
+                    const tdSubj = document.createElement("td");
+                    tdSubj.textContent = lesson.subject || "";
+                    tr.appendChild(tdSubj);
+
+                    const tdClass = document.createElement("td");
+                    tdClass.textContent = lesson.class_name || "";
+                    tr.appendChild(tdClass);
+
+                    const tdRoom = document.createElement("td");
+                    tdRoom.textContent = lesson.room || "";
+                    tr.appendChild(tdRoom);
+
+                    tr.addEventListener("click", () => {
+                        const id = lesson.lesson_id;
+                        if (!id) return;
+                        // Переходим на страницу журнала конкретного урока
+                        window.location.href = "lesson_journal.html?lesson_id=" + encodeURIComponent(id);
+                    });
+
+                    tbody.appendChild(tr);
+                });
+            })
+            .catch(() => {
+                // Заглушка, если teacher_schedule.cgi ещё не сделан
+                const fakeLessons = [
+                    {
+                        lesson_id: 1,
+                        lesson_num: 1,
+                        subject: "Математика",
+                        class_name: "5А",
+                        room: "203"
+                    },
+                    {
+                        lesson_id: 2,
+                        lesson_num: 3,
+                        subject: "Информатика",
+                        class_name: "7Б",
+                        room: "каб. информатики"
+                    }
+                ];
+
+                fakeLessons.forEach(lesson => {
+                    const tr = document.createElement("tr");
+                    tr.className = "clickable-row";
+                    tr.dataset.id = lesson.lesson_id;
+
+                    const tdNum = document.createElement("td");
+                    tdNum.textContent = lesson.lesson_num;
+                    tr.appendChild(tdNum);
+
+                    const tdSubj = document.createElement("td");
+                    tdSubj.textContent = lesson.subject;
+                    tr.appendChild(tdSubj);
+
+                    const tdClass = document.createElement("td");
+                    tdClass.textContent = lesson.class_name;
+                    tr.appendChild(tdClass);
+
+                    const tdRoom = document.createElement("td");
+                    tdRoom.textContent = lesson.room;
+                    tr.appendChild(tdRoom);
+
+                    tr.addEventListener("click", () => {
+                        window.location.href = "lesson_journal.html?lesson_id=" + encodeURIComponent(lesson.lesson_id);
+                    });
+
+                    tbody.appendChild(tr);
+                });
+            });
+    }
+
+
+    // Инициализация страницы
+    document.addEventListener("DOMContentLoaded", () => {
+        // Навигация по разделам
+        const btnHomework   = document.getElementById("btn-homework");
+        const btnMaterials  = document.getElementById("btn-materials");
+        const btnNotifs     = document.getElementById("btn-notifications");
+        const btnPrevDay    = document.getElementById("btn-prev-day");
+        const btnNextDay    = document.getElementById("btn-next-day");
+        const btnToday      = document.getElementById("btn-today");
+        const btnLogout     = document.getElementById("btn-logout");
+
+        // Переход к списку домашних заданий учителя
+        if (btnHomework) {
+            btnHomework.addEventListener("click", () => {
+                window.location.href = "all_homework.html";
+            });
+        }
+
+        // Переход к материалам учителя
+        if (btnMaterials) {
+            btnMaterials.addEventListener("click", () => {
+                window.location.href = "material.html";
+            });
+        }
+
+        // Переход к странице оповещений учителя
+        if (btnNotifs) {
+            btnNotifs.addEventListener("click", () => {
+                window.location.href = "notifications.html";
+            });
+        }
+
+        // Сдвиг даты расписания назад/вперёд и установка сегодняшнего дня
+        if (btnPrevDay) {
+            btnPrevDay.addEventListener("click", () => shiftCurrentDate(-1));
+        }
+
+        if (btnNextDay) {
+            btnNextDay.addEventListener("click", () => shiftCurrentDate(1));
+        }
+
+        if (btnToday) {
+            btnToday.addEventListener("click", () => setCurrentDate(new Date()));
+        }
+
+        // Кнопка "Выход" — возвращает на index.html (логин).
+        // При необходимости можно добавить вызов /cgi-bin/logout.cgi.
+        if (btnLogout) {
+            btnLogout.addEventListener("click", () => {
+                // пример с вызовом logout.cgi:
+                // fetch("/cgi-bin/logout.cgi").finally(() => {
+                //     window.location.href = "index.html";
+                // });
+                window.location.href = "index.html";
+            });
+        }
+
+        // Подтягиваем данные о пользователе
+        loadUserInfo();
+
+        // Ставим сегодняшнюю дату и загружаем расписание
+        setCurrentDate(new Date());
+    });
+</script>
+
+</body>
+</html>

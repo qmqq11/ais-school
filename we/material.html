@@ -1,0 +1,1128 @@
+<!--
+
+страница материалов от учителя
+
+ 1) /cgi-bin/profile.cgi          ( GET)
+
+    Вернуть профиль текущего пользователя (учителя) по сессии.
+
+Требования:
+    - Определить текущего пользователя по механизму сессий
+      (cookie / серверная сессия / иное — зависит от существующей системы).
+    - Вернуть JSON следующего формата:
+
+        {
+          "user_id":   <INT>,                  // ID пользователя в БД
+          "role":      "Учитель",              // Человекочитаемое название роли
+          "role_code": "teacher",              // Код роли: 'teacher' / 'admin'
+          "fio":       "Фамилия Имя Отчество"  // ФИО пользователя
+        }
+
+    - Фронт ожидает, что текущий пользователь — учитель,
+      т.е. role_code == 'teacher' 
+
+    - В случае отсутствия авторизации или сессии:
+        - Либо вернуть HTTP 403, либо JSON с ошибкой (по соглашению проекта).
+
+
+ 2) /cgi-bin/refs.cgi?type=classes           ( GET)
+
+    Вернуть список классов, для которых учитель может выкладывать материалы.
+
+Вход:
+    - Параметр query string:
+        type=classes
+
+Выход (JSON):
+    - Массив строк с названиями классов, например:
+
+        ["5А", "5Б", "6А", "7В"]
+
+    - Этот список используется:
+        * в фильтре по классу в интерфейсе (select над таблицей),
+        * в модальном окне "Добавить/Изменить материал" (select с классами).
+
+
+    - Классы должны браться из БД / справочников системы.
+
+
+
+ 3) /cgi-bin/teacher_materials_list.cgi      (GET)
+    Вернуть список материалов, добавленных конкретным учителем.
+Вход:
+    - Опциональный параметр query string:
+        class_name=5А  // фильтр по конкретному классу
+
+Логика:
+    - Определить current_user (teacher_id) по сессии.
+    - Выбрать из таблицы teaching_materials только записи учителя
+
+Выход (JSON):
+    Формат:
+
+        {
+          "materials": [
+            {
+              "id":         1,
+              "class_name": "5А",
+              "subject":    "Математика",
+              "title":      "Формулы сложения",
+              "description":"Ссылка: ...",
+              "file_path":  "/files/materials/1.pdf",
+              "created_at": "2025-11-30 10:00",
+              "updated_at": "2025-11-30 10:00"
+            },
+            ...
+          ]
+        }
+
+
+
+ 4) /cgi-bin/teacher_materials_save.cgi      (POST)
+
+    Создание или редактирование материала учителя.
+
+Тип запроса:
+    - POST, тело в формате multipart/form-data
+      (фронт отправляет FormData() с полями и файлом).
+
+Входные поля (form-data):
+    - id           — строка:.
+                       "0" или ""  → создать новый материал
+                       > "0"       → обновление существующего
+    - class_name   — ОБЯЗАТЕЛЬНО (строка, класс: "5А", "6Б", ...)
+    - subject      — опционально (строка, предмет: "Математика" и т.п.)
+    - title        — ОБЯЗАТЕЛЬНО (строка, тема материала)
+    - description  — опционально (строка, описание или ссылка)
+    - file         — опциональный файл (input type="file")
+
+Общая логика:
+    1) Определить current_user по сессии.
+    2) Проверить его роль:
+         - role_code должен быть 'teacher' или 'admin'.
+         - Если нет → вернуть JSON:
+               { "ok": false, "message": "Недостаточно прав" }
+
+    3) Разбор параметра id:
+       
+	   id == 0 (или пусто) → СОЗДАНИЕ НОВОЙ ЗАПИСИ
+       - Сформировать новую запись в teaching_materials:
+           teacher_id  = current_user.id
+           class_name  = :class_name
+           subject     = :subject
+           title       = :title
+           description = :description
+           file_path   = путь к файлу (см. ниже)
+           created_at  = NOW
+           updated_at  = NOW
+       - Если файл приложен:
+           * сохранить его в каталог
+           * записать полный/относительный путь в поле file_path.
+       - Если файл не приложен:
+           * file_path можно оставить пустым / NULL.
+
+        id > 0 → РЕДАКТИРОВАНИЕ СУЩЕСТВУЮЩЕЙ ЗАПИСИ
+       - Найти запись в teaching_materials по id:
+           SELECT * FROM teaching_materials WHERE id = :id
+       - Если запись не найдена:
+           вернуть:
+               { "ok": false, "message": "Материал не найден" }
+       - Проверить права:
+           Если current_user НЕ админ (role_code != 'admin')
+           И material.teacher_id != current_user.id:
+               вернуть:
+                   { "ok": false, "message": "Недостаточно прав" }
+       - Обновить поля:
+           class_name  = :class_name
+           subject     = :subject
+           title       = :title
+           description = :description
+           file_path   = либо старый путь, либо новый, если загружен файл
+           updated_at  = NOW
+       - Если был загружен НОВЫЙ файл:
+           * сохранить его в каталог с уникальным именем;
+           * записать новый путь в file_path;
+           *  старый файл можно удалить с диска
+
+Выход (JSON):
+    - При успехе:
+        { "ok": true }
+    - При ошибке (валидация, права, БД и т.п.):
+        { "ok": false, "message": "Текст ошибки" }
+
+
+ 5) /cgi-bin/teacher_materials_delete.cgi    (POST, JSON)
+
+    Удаление выбранного материала.
+Тип запроса:
+    - POST, содержимое — JSON.
+Вход (JSON):
+    {
+      "id": 123
+    }
+
+Логика:
+    1) Определить current_user по сессии.
+    2) Найти материал:
+       - Если нет такой записи:
+             вернуть:
+                 { "ok": false, "message": "Материал не найден" }
+
+    3)Проверить права:
+		material.teacher_id != current_user.id:
+              вернуть:
+                  { "ok": false, "message": "Недостаточно прав для удаления" }
+
+    4) Удалить запись
+       (при необходимости — также удалить связанный файл с диска)
+
+Выход (JSON):
+    - При успехе:
+        { "ok": true }
+
+    - При ошибке:
+        { "ok": false, "message": "Описание проблемы" }
+
+
+    - Ни в одном из CGI-скриптов нельзя позволять учителю
+      редактировать или удалять материалы, которые принадлежат
+      другому учителю.
+    - Полный контроль прав доступа — на стороне CGI.
+    - Все входные данные (в т.ч. JSON, query string, form-data)
+      должны быть провалидированы и экранированы при использовании в SQL.
+
+-->
+
+
+
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Материалы — Учитель</title>
+
+    <style>
+        /* Общие стили страницы: фон, шрифт, отступы */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Карточка-обёртка для всей страницы */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель: название + ФИО */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        /* Основная часть страницы под шапкой */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Блок с кнопками "Добавить/Изменить/Удалить" и "Обновить" */
+        .controls {
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .controls-left,
+        .controls-right {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        .btn-danger {
+            padding: 8px 16px;
+            background: #ff4d4d;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-danger:hover {
+            background: #cc0000;
+        }
+
+        /* Визуально "выключенная" кнопка (нет выбранной строки) */
+        .btn-disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        /* Фильтр по классу над таблицей */
+        .filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 10px;
+            align-items: center;
+        }
+
+        .filters select {
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 13px;
+        }
+
+        .filters label {
+            font-size: 13px;
+        }
+
+        /* Обёртка для таблицы материалов */
+        .materials-wrapper {
+            margin-top: 10px;
+            overflow-x: auto;
+        }
+
+        /* Таблица со списком материалов учителя */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        /* Подсветка выбранной строки (для редактирования/удаления) */
+        .selected-row td {
+            background: #ffe5ff;
+        }
+
+        .text-cell {
+            max-width: 260px;
+        }
+
+        .link-file {
+            color: #0066cc;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+
+        /* Нижние кнопки (выйти назад в меню учителя) */
+        .footer-buttons {
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* Сообщения на странице (ошибки/успех) */
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+
+        /* Бэкдроп модального окна (полупрозрачный фон) */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        /* Собственно модальное окно "Добавить/Изменить материал" */
+        .modal {
+            background: #ffffff;
+            padding: 20px 24px;
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+            width: 480px;
+            max-width: 95%;
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            color: #660066;
+        }
+
+        .modal-row {
+            margin-bottom: 10px;
+        }
+
+        .modal-row label {
+            display: block;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        .modal-row input,
+        .modal-row textarea,
+        .modal-row select {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        /* Подсветка обязательных полей с ошибкой */
+        .field-error {
+            border: 2px solid #ff4d4d !important;
+        }
+
+        .modal-buttons {
+            margin-top: 14px;
+            text-align: right;
+        }
+
+        .modal-error {
+            margin-top: 6px;
+            font-size: 13px;
+            color: #cc0000;
+            min-height: 18px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Материалы
+            </div>
+            <div class="topbar-user">
+                Роль: <span id="user-role">Учитель</span>,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Материалы учителя</div>
+
+        <!-- Кнопки управления: добавить/изменить/удалить/обновить -->
+        <div class="controls">
+            <div class="controls-left">
+                <button class="btn-primary" id="btn-add">Добавить материал</button>
+                <button class="btn-secondary btn-disabled" id="btn-edit" disabled>
+                    Изменить выбранный
+                </button>
+                <button class="btn-danger btn-disabled" id="btn-delete" disabled>
+                    Удалить выбранный
+                </button>
+            </div>
+            <div class="controls-right">
+                <button class="btn-secondary" id="btn-reload">Обновить список</button>
+            </div>
+        </div>
+
+        <!-- Фильтр по классу (класс выбирается из справочника классов) -->
+        <div class="filters">
+            <div>
+                <label for="filter-class">Класс:</label>
+                <select id="filter-class">
+                    <!-- заполняется из refs.cgi -->
+                    <option value="">Все классы</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Сообщения по результатам операций (ошибка, успешно и т.п.) -->
+        <div class="page-message" id="page-message"></div>
+
+        <!-- Таблица с материалами учителя -->
+        <div class="materials-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Класс</th>
+                        <th>Предмет</th>
+                        <th>Тема</th>
+                        <th>Описание / ссылка</th>
+                        <th>Файл</th>
+                        <th>Дата добавления</th>
+                    </tr>
+                </thead>
+                <tbody id="materials-body">
+                    <!-- строки с материалами заполняет JS из teacher_materials_list.cgi -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Кнопка "Выйти" → возвращаемся в меню учителя -->
+        <div class="footer-buttons">
+            <button class="btn-secondary" id="btn-exit">Выйти</button>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно для добавления/редактирования материала учителя -->
+<div class="modal-backdrop" id="material-modal-backdrop">
+    <div class="modal">
+        <div class="modal-title" id="material-modal-title">Добавление материала</div>
+
+        <!-- Скрытое поле: id материала (0/пусто — новый, >0 — редактирование) -->
+        <input type="hidden" id="material-id" value="">
+
+        <div class="modal-row">
+            <label for="modal-class">Кому (класс)</label>
+            <select id="modal-class">
+                <!-- заполняется из refs.cgi -->
+            </select>
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-subject">Предмет (опционально)</label>
+            <input type="text" id="modal-subject" placeholder="Например: Математика">
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-title">Тема</label>
+            <input type="text" id="modal-title" placeholder="Тема материала">
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-description">Описание / ссылка</label>
+            <textarea id="modal-description" placeholder="Описание или ссылка на ресурс"></textarea>
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-file">Файл (при необходимости)</label>
+            <input type="file" id="modal-file">
+        </div>
+
+        <div class="modal-error" id="modal-error"></div>
+
+        <div class="modal-buttons">
+            <button class="btn-secondary" id="modal-btn-cancel">Отмена</button>
+            <button class="btn-primary" id="modal-btn-ok">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    //  текущий учитель и данные по справочнику/таблице
+    const currentUser = {
+        userId: null,
+        roleCode: "teacher",
+        fio: ""
+    };
+
+    // Локальный запас классов на случай, если refs.cgi ещё не готов
+    const defaultRefClasses = ["5А", "5Б", "6А", "7В"];
+    let refClasses = [...defaultRefClasses];
+
+    // Текущий список материалов, полученный от CGI
+    let allMaterials = [];
+    // id выбранной строки в таблице (для редактирования/удаления)
+    let selectedMaterialId = null;
+
+    // Загрузка профиля учителя (profile.cgi)
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId   = data.user_id || null;
+                currentUser.roleCode = data.role_code || "teacher";
+                currentUser.fio      = data.fio || "";
+
+                document.getElementById("user-role").textContent = data.role || "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio || "Иванов Иван Иванович (тест)";
+            })
+            .catch(() => {
+                // Заглушка, если profile.cgi ещё нет
+                currentUser.userId   = 5;
+                currentUser.roleCode = "teacher";
+                currentUser.fio      = "Иванов Иван Иванович (тест)";
+                document.getElementById("user-role").textContent = "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio;
+            });
+    }
+
+    //  Загрузка справочника классов (refs.cgi?type=classes)
+    function loadRefClasses() {
+        fetch("/cgi-bin/refs.cgi?type=classes")
+            .then(res => res.json())
+            .then(data => {
+                if (Array.isArray(data)) {
+                    refClasses = data;
+                } else {
+                    refClasses = [...defaultRefClasses];
+                }
+                const filterSelect = document.getElementById("filter-class");
+                const modalSelect  = document.getElementById("modal-class");
+                fillSelectOptions(filterSelect, ["Все классы", ...refClasses], true);
+                fillSelectOptions(modalSelect, refClasses, false);
+            })
+            .catch(() => {
+                // Если CGI нет — используем дефолтный список классов
+                refClasses = [...defaultRefClasses];
+                const filterSelect = document.getElementById("filter-class");
+                const modalSelect  = document.getElementById("modal-class");
+                fillSelectOptions(filterSelect, ["Все классы", ...refClasses], true);
+                fillSelectOptions(modalSelect, refClasses, false);
+            });
+    }
+
+    // Универсальная функция заполнения select'а
+    function fillSelectOptions(selectEl, values, isFilter) {
+        if (!selectEl) return;
+        selectEl.innerHTML = "";
+
+        if (isFilter) {
+            // Режим фильтра: первая опция — "Все классы"
+            const optAll = document.createElement("option");
+            optAll.value = "";
+            optAll.textContent = "Все классы";
+            selectEl.appendChild(optAll);
+
+            (values || []).forEach(v => {
+                if (v === "Все классы") return;
+                const opt = document.createElement("option");
+                opt.value = v;
+                opt.textContent = v;
+                selectEl.appendChild(opt);
+            });
+        } else {
+            // Режим модалки: первая опция — плейсхолдер
+            const optEmpty = document.createElement("option");
+            optEmpty.value = "";
+            optEmpty.textContent = "-- выберите класс --";
+            selectEl.appendChild(optEmpty);
+
+            (values || []).forEach(v => {
+                const opt = document.createElement("option");
+                opt.value = v;
+                opt.textContent = v;
+                selectEl.appendChild(opt);
+            });
+        }
+    }
+
+    // Загрузка списка материалов (teacher_materials_list.cgi)
+    function loadMaterials() {
+        const tbody = document.getElementById("materials-body");
+        const pageMessage = document.getElementById("page-message");
+
+        tbody.innerHTML = "";
+        pageMessage.textContent = "";
+        pageMessage.style.color = "#cc0000";
+
+        const classFilter = document.getElementById("filter-class") ? document.getElementById("filter-class").value : "";
+
+        // Собираем query string с фильтром class_name (если выбран)
+        const params = new URLSearchParams();
+        if (classFilter) params.append("class_name", classFilter);
+
+        const url = "/cgi-bin/teacher_materials_list.cgi" + (params.toString() ? "?" + params.toString() : "");
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                // Поддерживаем как массив, так и { materials: [...] }
+                const list = Array.isArray(data) ? data : (data.materials || []);
+                allMaterials = list;
+                renderMaterialsTable();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если CGI ещё не реализован
+                allMaterials = [
+                    {
+                        id: 1,
+                        class_name: "5А",
+                        subject: "Математика",
+                        title: "Формулы сложения",
+                        description: "https://example.com/formuly",
+                        file_path: "/files/materials/1.pdf",
+                        created_at: "2025-11-30 10:00"
+                    },
+                    {
+                        id: 2,
+                        class_name: "6Б",
+                        subject: "Математика",
+                        title: "Дроби",
+                        description: "Теория по сложению дробей",
+                        file_path: "",
+                        created_at: "2025-11-29 12:00"
+                    }
+                ];
+                renderMaterialsTable();
+            });
+    }
+
+    // Отрисовка таблицы по массиву allMaterials
+    function renderMaterialsTable() {
+        const tbody = document.getElementById("materials-body");
+        tbody.innerHTML = "";
+
+        if (!allMaterials.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 6;
+            td.textContent = "Материалы отсутствуют.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            selectedMaterialId = null;
+            updateSelectionHighlight();
+            updateRowButtonsState();
+            return;
+        }
+
+        allMaterials.forEach(m => {
+            const tr = document.createElement("tr");
+            tr.dataset.id = m.id;
+
+            const tdClass = document.createElement("td");
+            tdClass.textContent = m.class_name || "";
+            tr.appendChild(tdClass);
+
+            const tdSubject = document.createElement("td");
+            tdSubject.textContent = m.subject || "";
+            tr.appendChild(tdSubject);
+
+            const tdTitle = document.createElement("td");
+            tdTitle.textContent = m.title || "";
+            tr.appendChild(tdTitle);
+
+            const tdDesc = document.createElement("td");
+            tdDesc.className = "text-cell";
+            tdDesc.textContent = m.description || "";
+            tr.appendChild(tdDesc);
+
+            const tdFile = document.createElement("td");
+            if (m.file_path) {
+                const a = document.createElement("a");
+                a.href = m.file_path;
+                a.textContent = "Скачать";
+                a.className = "link-file";
+                a.target = "_blank";
+                tdFile.appendChild(a);
+            } else {
+                tdFile.textContent = "—";
+            }
+            tr.appendChild(tdFile);
+
+            const tdCreated = document.createElement("td");
+            tdCreated.textContent = m.created_at || "";
+            tr.appendChild(tdCreated);
+
+            // Клик по строке → выбираем её для "Изменить" / "Удалить"
+            tr.addEventListener("click", () => {
+                selectedMaterialId = m.id;
+                updateSelectionHighlight();
+                updateRowButtonsState();
+            });
+
+            tbody.appendChild(tr);
+        });
+
+        updateSelectionHighlight();
+        updateRowButtonsState();
+    }
+
+    // Подсветка выбранной строки
+    function updateSelectionHighlight() {
+        const rows = document.querySelectorAll("#materials-body tr");
+        rows.forEach(tr => {
+            const id = tr.dataset.id ? Number(tr.dataset.id) : null;
+            if (id === selectedMaterialId) {
+                tr.classList.add("selected-row");
+            } else {
+                tr.classList.remove("selected-row");
+            }
+        });
+    }
+
+    // Включить/выключить кнопки "Изменить" и "Удалить"
+    function updateRowButtonsState() {
+        const btnEdit   = document.getElementById("btn-edit");
+        const btnDelete = document.getElementById("btn-delete");
+
+        const hasSelection = selectedMaterialId !== null;
+
+        if (hasSelection) {
+            btnEdit.disabled   = false;
+            btnDelete.disabled = false;
+            btnEdit.classList.remove("btn-disabled");
+            btnDelete.classList.remove("btn-disabled");
+        } else {
+            btnEdit.disabled   = true;
+            btnDelete.disabled = true;
+            btnEdit.classList.add("btn-disabled");
+            btnDelete.classList.add("btn-disabled");
+        }
+    }
+
+    //  Работа с модальным окном "Материал"
+    function openMaterialModal(mode, material) {
+        const modalTitle  = document.getElementById("material-modal-title");
+        const idField     = document.getElementById("material-id");
+        const classSelect = document.getElementById("modal-class");
+        const subjectInp  = document.getElementById("modal-subject");
+        const titleInp    = document.getElementById("modal-title");
+        const descTa      = document.getElementById("modal-description");
+        const fileInp     = document.getElementById("modal-file");
+        const errorBox    = document.getElementById("modal-error");
+
+        // Сбрасываем ошибки
+        errorBox.textContent = "";
+        [classSelect, subjectInp, titleInp, descTa].forEach(el => {
+            if (el) el.classList.remove("field-error");
+        });
+
+        // Режим "Добавить"
+        if (mode === "add") {
+            modalTitle.textContent = "Добавление материала";
+            idField.value          = "";
+            classSelect.value      = "";
+            subjectInp.value       = "";
+            titleInp.value         = "";
+            descTa.value           = "";
+            if (fileInp) fileInp.value = "";
+        // Режим "Изменить"
+        } else if (mode === "edit" && material) {
+            modalTitle.textContent = "Редактирование материала";
+            idField.value          = material.id || "";
+            classSelect.value      = material.class_name || "";
+            subjectInp.value       = material.subject || "";
+            titleInp.value         = material.title || "";
+            descTa.value           = material.description || "";
+            if (fileInp) fileInp.value = "";
+        }
+
+        document.getElementById("material-modal-backdrop").style.display = "flex";
+    }
+
+    function closeMaterialModal() {
+        document.getElementById("material-modal-backdrop").style.display = "none";
+    }
+
+    //  Подготовка и отправка данных из модалки на teacher_materials_save.cgi
+    function handleMaterialModalOk() {
+        const idField     = document.getElementById("material-id");
+        const classSelect = document.getElementById("modal-class");
+        const subjectInp  = document.getElementById("modal-subject");
+        const titleInp    = document.getElementById("modal-title");
+        const descTa      = document.getElementById("modal-description");
+        const fileInp     = document.getElementById("modal-file");
+        const errorBox    = document.getElementById("modal-error");
+        const pageMessage = document.getElementById("page-message");
+
+        // Сброс старых ошибок
+        errorBox.textContent = "";
+        pageMessage.textContent = "";
+        pageMessage.style.color = "#cc0000";
+
+        [classSelect, subjectInp, titleInp, descTa].forEach(el => {
+            if (el) el.classList.remove("field-error");
+        });
+
+        const id        = idField.value ? Number(idField.value) : 0;
+        const className = classSelect.value.trim();
+        const subject   = subjectInp.value.trim();
+        const title     = titleInp.value.trim();
+        const descr     = descTa.value.trim();
+
+        let hasError = false;
+
+        // Проверка обязательных полей
+        if (!className) {
+            classSelect.classList.add("field-error");
+            hasError = true;
+        }
+        if (!title) {
+            titleInp.classList.add("field-error");
+            hasError = true;
+        }
+
+        if (hasError) {
+            errorBox.textContent = "Заполните обязательные поля (класс и тему).";
+            return;
+        }
+
+        // Собираем form-data под multipart/form-data
+        const formData = new FormData();
+        formData.append("id", String(id || 0));
+        formData.append("class_name", className);
+        formData.append("subject", subject);
+        formData.append("title", title);
+        formData.append("description", descr);
+        if (fileInp && fileInp.files && fileInp.files.length > 0) {
+            formData.append("file", fileInp.files[0]);
+        }
+
+        saveMaterial(formData);
+    }
+
+    // Непосредственный вызов teacher_materials_save.cgi
+    function saveMaterial(formData) {
+        const errorBox    = document.getElementById("modal-error");
+        const pageMessage = document.getElementById("page-message");
+
+        fetch("/cgi-bin/teacher_materials_save.cgi", {
+            method: "POST",
+            body: formData
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Материал сохранён.");
+                    closeMaterialModal();
+                    loadMaterials();
+                    pageMessage.style.color = "#007700";
+                    pageMessage.textContent = "Материал успешно сохранён.";
+                } else {
+                    const msg = data.message || "Ошибка сохранения материала на сервере.";
+                    errorBox.textContent = msg;
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА: локально считаем, что всё ОК
+                alert("Сохранение (заглушка): считаем, что всё успешно.");
+                closeMaterialModal();
+
+                const id = Number(formData.get("id") || 0);
+                const newMat = {
+                    id: id || (allMaterials.reduce((m, n) => Math.max(m, n.id || 0), 0) + 1),
+                    class_name: formData.get("class_name") || "",
+                    subject: formData.get("subject") || "",
+                    title: formData.get("title") || "",
+                    description: formData.get("description") || "",
+                    file_path: formData.get("file") ? "Заглушка-файл" : "",
+                    created_at: "локально"
+                };
+
+                if (id > 0) {
+                    allMaterials = allMaterials.map(m =>
+                        m.id === id ? newMat : m
+                    );
+                } else {
+                    allMaterials.push(newMat);
+                }
+
+                renderMaterialsTable();
+                pageMessage.style.color = "#007700";
+                pageMessage.textContent = "Материал сохранён (локально, без CGI).";
+            });
+    }
+
+    // Удаление выбранного материала (teacher_materials_delete.cgi)
+    function deleteSelectedMaterial() {
+        const pageMessage = document.getElementById("page-message");
+
+        if (selectedMaterialId == null) return;
+        if (!confirm("Удалить выбранный материал?")) return;
+
+        const payload = { id: selectedMaterialId };
+
+        fetch("/cgi-bin/teacher_materials_delete.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Материал удалён.");
+                    selectedMaterialId = null;
+                    loadMaterials();
+                    pageMessage.style.color = "#007700";
+                    pageMessage.textContent = "Материал успешно удалён.";
+                } else {
+                    const msg = data.message || "Ошибка удаления материала на сервере.";
+                    pageMessage.style.color = "#cc0000";
+                    pageMessage.textContent = msg;
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА: удаляем только в памяти
+                alert("Удаление (заглушка): считаем, что всё успешно.");
+                allMaterials = allMaterials.filter(m => m.id !== selectedMaterialId);
+                selectedMaterialId = null;
+                renderMaterialsTable();
+                pageMessage.style.color = "#007700";
+                pageMessage.textContent = "Материал удалён (локально, без CGI).";
+            });
+    }
+
+    // Выход из раздела материалов → teacher_menu.html
+    function exitMaterialsPage() {
+        if (!confirm("Выйти в меню учителя? Несохранённые изменения могут быть потеряны.")) {
+            return;
+        }
+        window.location.href = "teacher_menu.html";
+    }
+
+    // Инициализация страницы
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnAdd    = document.getElementById("btn-add");
+        const btnEdit   = document.getElementById("btn-edit");
+        const btnDelete = document.getElementById("btn-delete");
+        const btnReload = document.getElementById("btn-reload");
+        const btnExit   = document.getElementById("btn-exit");
+
+        const filterClass = document.getElementById("filter-class");
+
+        const modalBackdrop  = document.getElementById("material-modal-backdrop");
+        const modalBtnOk     = document.getElementById("modal-btn-ok");
+        const modalBtnCancel = document.getElementById("modal-btn-cancel");
+
+        // Кнопка "Добавить материал" → открываем модалку в режиме "add"
+        if (btnAdd) {
+            btnAdd.addEventListener("click", () => openMaterialModal("add", null));
+        }
+
+        // Кнопка "Изменить выбранный" → модалка в режиме "edit"
+        if (btnEdit) {
+            btnEdit.addEventListener("click", () => {
+                const mat = allMaterials.find(m => m.id === selectedMaterialId);
+                if (!mat) return;
+                openMaterialModal("edit", mat);
+            });
+        }
+
+        // Кнопка "Удалить выбранный" → teacher_materials_delete.cgi
+        if (btnDelete) {
+            btnDelete.addEventListener("click", deleteSelectedMaterial);
+        }
+
+        // Кнопка "Обновить список" → перезагружаем данные из teacher_materials_list.cgi
+        if (btnReload) {
+            btnReload.addEventListener("click", loadMaterials);
+        }
+
+        // Кнопка "Выйти" → переход в меню учителя
+        if (btnExit) {
+            btnExit.addEventListener("click", exitMaterialsPage);
+        }
+
+        // Фильтр по классу → при изменении фильтра перезагружаем список
+        if (filterClass) {
+            filterClass.addEventListener("change", loadMaterials);
+        }
+
+        // Кнопка "Сохранить" в модалке → валидация и вызов teacher_materials_save.cgi
+        if (modalBtnOk) {
+            modalBtnOk.addEventListener("click", handleMaterialModalOk);
+        }
+
+        // Кнопка "Отмена" в модалке → закрываем без сохранения
+        if (modalBtnCancel) {
+            modalBtnCancel.addEventListener("click", closeMaterialModal);
+        }
+
+        // Клик по затемнённому фону закрывает модалку
+        if (modalBackdrop) {
+            modalBackdrop.addEventListener("click", (e) => {
+                if (e.target === modalBackdrop) {
+                    closeMaterialModal();
+                }
+            });
+        }
+
+        // Первичная загрузка профиля, справочника классов и списка материалов
+        loadUserInfo();
+        loadRefClasses();
+        loadMaterials();
+    });
+</script>
+
+</body>
+</html>

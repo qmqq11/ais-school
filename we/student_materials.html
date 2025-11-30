@@ -1,0 +1,476 @@
+<!--
+    МАТЕРИАЛЫ ДЛЯ УЧЕНИКА (ТОЛЬКО ПРОСМОТР)
+
+    Таблица materials (аналог учительской material.html):
+      id            INTEGER PK
+      class_name    TEXT            -- для какого класса
+      subject       TEXT
+      teacher_id    INTEGER
+      teacher_fio   TEXT
+      title         TEXT            -- тема
+      description   TEXT            -- описание/ссылка
+      file_url      TEXT            -- ссылка на файл (если один)
+      created_at    TEXT
+
+
+    1) /cgi-bin/profile.cgi (GET)
+       • Определить по сессии текущего пользователя.
+       • Проверить, что role_code = 'student'.
+       • Вернуть JSON вида:
+         {
+           "user_id":   123,
+           "fio":       "Петров Иван Иванович",
+           "role":      "Ученик",
+           "role_code": "student",
+           "class_name":"7Б"
+         }
+       • Если сессии нет/роль не student — 401/ошибка.
+
+
+    2) /cgi-bin/student_materials_list.cgi (GET)
+       ВЫДАТЬ СПИСОК МАТЕРИАЛОВ ДЛЯ ЭТОГО УЧЕНИКА.
+
+       • По сессии определяем:
+           - student_id (users.id)
+           - class_name ученика (например, "7Б")
+
+       • В SQL/логике CGI:
+           - выбираем из materials все записи:
+               class_name = class_name ученика,
+               а при необходимости — общешкольные (на усмотрение школы:
+               отдельное значение class_name или audience_type).
+
+       • Формируем JSON:
+         {
+           "materials": [
+             {
+               "id":         1,
+               "subject":    "Математика",
+               "teacher":    "Иванов И.И.",          -- можно брать из teacher_fio
+               "title":      "Теория по теме 'Дроби'",
+               "description":"Ссылка на презентацию...",
+               "file_url":   "/files/materials/1.pdf",
+               "created_at": "2025-09-01"
+             },
+             ...
+           ]
+         }
+
+       • Никаких действий по изменению/удалению со стороны ученика нет —
+         страница ТОЛЬКО отображает полученный список.
+
+    • НЕ доверять данным с клиента. Какому ученику что показывать — решает только CGI,
+      опираясь на сессию и базу.
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Материалы — Ученик</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Центральная "карточка" страницы */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель с заголовком и ФИО ученика */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Кнопка второстепенного действия (белая с фиолетовой рамкой) */
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        /* Панель управления над таблицей материалов: кнопка + фильтр по предмету */
+        .controls {
+            margin-bottom: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .controls select {
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 13px;
+        }
+
+        /* Обёртка для таблицы с материалами (на случай большого количества столбцов) */
+        .materials-wrapper {
+            overflow-x: auto;
+        }
+
+        /* Таблица материалов: предмет, учитель, тема, описание, файл, дата */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        /* Ячейка с описанием/ссылкой, ограничиваем ширину */
+        .text-cell {
+            max-width: 300px;
+        }
+
+        /* Блок для сообщений страницы (ошибки/информация) */
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <!-- Верхняя панель: название раздела + краткая информация об ученике -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Материалы
+            </div>
+            <div class="topbar-user">
+                Ученик: <span id="user-fio">ФИО</span>,
+                Класс: <span id="user-class">5А</span>
+            </div>
+        </div>
+
+        <!-- Кнопка возврата в главное меню ученика -->
+        <button class="btn-secondary" id="btn-back">На главную</button>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Материалы для обучения</div>
+
+        <!-- Панель управления: обновить + фильтр по предмету -->
+        <div class="controls">
+            <button class="btn-secondary" id="btn-reload">Обновить</button>
+
+            <label>
+                Предмет:
+                <!-- Фильтр: показывать материалы по выбранному предмету или все -->
+                <select id="filter-subject">
+                    <option value="">Все</option>
+                </select>
+            </label>
+        </div>
+
+        <!-- Сообщения страницы (ошибки, подсказки) -->
+        <div class="page-message" id="page-message"></div>
+
+        <!-- Таблица со списком материалов (данные подставляются в JS) -->
+        <div class="materials-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Предмет</th>
+                        <th>Учитель</th>
+                        <th>Тема</th>
+                        <th>Описание / ссылка</th>
+                        <th>Файл</th>
+                        <th>Дата</th>
+                    </tr>
+                </thead>
+                <tbody id="materials-body">
+                    <!-- строки материалов создаются динамически -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Информация о текущем пользователе (ученике), заполняется из profile.cgi
+    const currentUser = {
+        userId: null,
+        fio: "",
+        className: "",
+        roleCode: "student"
+    };
+
+    // Все загруженные с бэка материалы (для последующей фильтрации по предмету)
+    let allMaterials = [];
+
+    // Загрузка профиля ученика из /cgi-bin/profile.cgi.
+    // Если CGI ещё не реализован — используется тестовая заглушка.
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId    = data.user_id || null;
+                currentUser.fio       = data.fio || "";
+                currentUser.className = data.class_name || "";
+                currentUser.roleCode  = data.role_code || "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio || "ФИО (тест)";
+                document.getElementById("user-class").textContent = currentUser.className || "5А";
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если profile.cgi нет/не отвечает
+                currentUser.userId    = 100;
+                currentUser.fio       = "Тестовый Ученик";
+                currentUser.className = "7Б";
+                currentUser.roleCode  = "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio;
+                document.getElementById("user-class").textContent = currentUser.className;
+            });
+    }
+
+    // Загрузка списка материалов для ученика:
+    //   /cgi-bin/student_materials_list.cgi
+    // CGI учитывает класс ученика и отдаёт только "его" материалы.
+    function loadMaterials() {
+        const tbody = document.getElementById("materials-body");
+        const pageMessage = document.getElementById("page-message");
+
+        tbody.innerHTML = "";
+        pageMessage.textContent = "";
+
+        fetch("/cgi-bin/student_materials_list.cgi")
+            .then(res => res.json())
+            .then(data => {
+                const list = data.materials || [];
+                allMaterials = list;
+
+                // Отрисовываем таблицу (учитывая фильтр по предмету)
+                renderMaterialsTable();
+                // Заполняем выпадающий список "Предмет" на основе загруженных данных
+                fillSubjectFilter();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если student_materials_list.cgi ещё не реализован
+                allMaterials = [
+                    {
+                        id: 1,
+                        subject: "Математика",
+                        teacher: "Иванов И.И.",
+                        title: "Дроби",
+                        description: "Презентация по теме 'Дроби'.",
+                        file_url: "#",
+                        created_at: "2025-09-01"
+                    },
+                    {
+                        id: 2,
+                        subject: "История",
+                        teacher: "Петров П.П.",
+                        title: "Древний Египет",
+                        description: "Ссылка на видео-урок.",
+                        file_url: "",
+                        created_at: "2025-09-02"
+                    }
+                ];
+                renderMaterialsTable();
+                fillSubjectFilter();
+            });
+    }
+
+    // Отрисовка таблицы материалов с учётом выбранного фильтра по предмету
+    function renderMaterialsTable() {
+        const tbody = document.getElementById("materials-body");
+        const filterSubject = document.getElementById("filter-subject").value;
+
+        tbody.innerHTML = "";
+
+        // Начинаем с полного списка, при необходимости фильтруем по выбранному предмету
+        let list = [...allMaterials];
+        if (filterSubject) {
+            list = list.filter(m => m.subject === filterSubject);
+        }
+
+        // Если материалов нет — выводим одну строку "Материалы отсутствуют"
+        if (!list.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 6;
+            td.textContent = "Материалы отсутствуют.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+        }
+
+        // Строим строки по каждому материалу
+        list.forEach(item => {
+            const tr = document.createElement("tr");
+
+            const tdSub = document.createElement("td");
+            tdSub.textContent = item.subject || "";
+            tr.appendChild(tdSub);
+
+            const tdTeacher = document.createElement("td");
+            tdTeacher.textContent = item.teacher || "";
+            tr.appendChild(tdTeacher);
+
+            const tdTitle = document.createElement("td");
+            tdTitle.textContent = item.title || "";
+            tr.appendChild(tdTitle);
+
+            const tdDesc = document.createElement("td");
+            tdDesc.className = "text-cell";
+            tdDesc.textContent = item.description || "";
+            tr.appendChild(tdDesc);
+
+            // Столбец "Файл": ссылка "Скачать", если file_url не пустой, иначе "-"
+            const tdFile = document.createElement("td");
+            if (item.file_url) {
+                const a = document.createElement("a");
+                a.href = item.file_url;
+                a.textContent = "Скачать";
+                a.target = "_blank";
+                tdFile.appendChild(a);
+            } else {
+                tdFile.textContent = "-";
+            }
+            tr.appendChild(tdFile);
+
+            const tdDate = document.createElement("td");
+            tdDate.textContent = item.created_at || "";
+            tr.appendChild(tdDate);
+
+            tbody.appendChild(tr);
+        });
+    }
+
+    // Заполнить выпадающий список "Предмет" уникальными значениями из allMaterials
+    function fillSubjectFilter() {
+        const select = document.getElementById("filter-subject");
+        if (!select) return;
+
+        // Собираем уникальные предметы, исключаем пустые, сортируем по алфавиту (ru)
+        const subjects = Array.from(new Set(
+            allMaterials.map(m => m.subject).filter(Boolean)
+        )).sort((a, b) => a.localeCompare(b, "ru"));
+
+        const currentVal = select.value;
+
+        select.innerHTML = "";
+        const optAll = document.createElement("option");
+        optAll.value = "";
+        optAll.textContent = "Все";
+        select.appendChild(optAll);
+
+        subjects.forEach(s => {
+            const opt = document.createElement("option");
+            opt.value = s;
+            opt.textContent = s;
+            select.appendChild(opt);
+        });
+
+        // Стараемся сохранить предыдущий выбор, если он ещё есть в списке
+        if (currentVal) {
+            select.value = currentVal;
+        }
+    }
+
+    // Инициализация страницы: навешиваем обработчики и загружаем данные
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnBack   = document.getElementById("btn-back");
+        const btnReload = document.getElementById("btn-reload");
+        const filterSub = document.getElementById("filter-subject");
+
+        // Кнопка "На главную" → переход к меню ученика
+        if (btnBack) {
+            btnBack.addEventListener("click", () => {
+                window.location.href = "student_menu.html";
+            });
+        }
+
+        // Кнопка "Обновить" → повторно запросить список материалов с бэка
+        if (btnReload) {
+            btnReload.addEventListener("click", loadMaterials);
+        }
+
+        // При смене предмета в фильтре просто перерисовываем таблицу
+        if (filterSub) {
+            filterSub.addEventListener("change", renderMaterialsTable);
+        }
+
+        // Стартовая загрузка: профиль ученика + материалы
+        loadUserInfo();
+        loadMaterials();
+    });
+</script>
+
+</body>
+</html>

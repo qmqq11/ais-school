@@ -1,0 +1,1106 @@
+<!--
+    
+	 admin_users.html — страница управления пользователями для администратора
+    в подсистеме «Электронная школа».
+
+    Назначение страницы:
+      • Отображать список всех пользователей (ученики, учителя, администраторы).
+      • Позволять администратору искать, фильтровать, редактировать и удалять пользователей.
+      • Переходить к добавлению нового пользователя и обратно на главную страницу администрирования.
+      • На страницу допускается только авторизованный пользователь с role = 'admin'.
+      • После входа через index.cgi данные user_id, role, fio лежат в сессии
+        и проверяются на стороне CGI-скриптов.
+
+
+	1) /cgi-bin/users_list.cgi (GET)
+       - Проверить сессию и роль (admin).
+       - Сделать SELECT из БД по пользователям.
+       - Вернуть JSON-массив, например:
+         [
+           {
+             "id": 1,
+             "role": "student" | "teacher" | "admin",
+             "fullName": "Иванов Иван Иванович",
+             "login": "ivanov",
+             "email": "ivanov@example.com",
+             "className": "5А",                        // только для учеников
+             "subjects": ["Математика","Физика"],      // только для учителей
+             "adminNotes": "Ответственный за журнал"   // только для админов (опционально)
+           },
+           ...
+         ]
+
+    2) /cgi-bin/delete_user.cgi (POST, x-www-form-urlencoded)
+       Параметры:
+         id — идентификатор пользователя.
+       Действия:
+         - Проверить сессию, роль (admin).
+         - Удалить пользователя в БД (или пометить как удалённого).
+       Ответ:
+         200  — успех.
+         4xx/5xx — ошибка (нет прав, нет такого id, ошибка БД и т.п.).
+
+    3) /cgi-bin/edit_user.cgi (POST, x-www-form-urlencoded)
+       Общие параметры:
+         id       — идентификатор пользователя.
+         fullName — ФИО.
+         login    — логин.
+         email    — e-mail (может быть пустым).
+
+       Для разных ролей дополнительно:
+         role='student' : className  — строка вида "5А".
+         role='teacher' : subjects   — строка с предметами через запятую:
+                                      "Математика, Информатика".
+         role='admin'   : adminNotes — произвольный комментарий.
+
+       Действия:
+         - Проверить сессию, роль (admin).
+         - Определить роль редактируемого пользователя по id.
+         - Провалидировать поля (не пустые fullName и login и т.п.).
+         - Обновить данные в БД.
+
+       Ответ:
+         200  — успех.
+         4xx/5xx — ошибка.
+
+    JS на этой странице уже:
+      - запрашивает список пользователей,
+      - рисует таблицу,
+      - фильтрует по роли/ФИО/классам/предметам,
+      - отправляет запросы на редактирование и удаление.
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Электронная школа — Пользователи</title>
+    <style>
+        /* Общие стили страницы / фон */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Центральный контейнер (карточка) */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель с заголовком и ФИО администратора */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        /* Область основного содержимого */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Переключатель ролей (фильтр: ученики / учителя / админы) */
+        .role-toggle {
+            display: inline-flex;
+            border-radius: 999px;
+            background: #f1e3f7;
+            padding: 3px;
+            margin-bottom: 14px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+        }
+
+        .role-btn {
+            padding: 6px 16px;
+            border-radius: 999px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 14px;
+            color: #660066;
+            white-space: nowrap;
+        }
+
+        .role-btn.active {
+            background: #cc10cc;
+            color: #ffffff;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+        }
+
+        .role-btn:not(.active):hover {
+            background: #f7e3f7;
+        }
+
+        /* Панель фильтров: поиск ФИО + фильтры предметов / классов */
+        .filters-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 12px;
+            align-items: flex-end;
+        }
+
+        .filter-block {
+            display: flex;
+            flex-direction: column;
+            font-size: 13px;
+        }
+
+        .filter-block label {
+            margin-bottom: 2px;
+        }
+
+        .filter-block input,
+        .filter-block select {
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 13px;
+            min-width: 150px;
+        }
+
+        .filter-block.wide input {
+            min-width: 260px;
+        }
+
+        /* Контейнер таблицы пользователей */
+        .table-container {
+            margin-top: 10px;
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+            padding: 10px 12px 12px 12px;
+            overflow-x: auto;
+        }
+
+        /* Таблица списка пользователей */
+        table.users-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        table.users-table thead {
+            background: #f1e3f7;
+        }
+
+        table.users-table th,
+        table.users-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #ddd;
+            text-align: left;
+        }
+
+        table.users-table th {
+            font-weight: bold;
+            color: #660066;
+        }
+
+        table.users-table tr:hover {
+            background: #f9f4ff;
+        }
+
+        table.users-table tr.selected {
+            background: #fde4ff;
+        }
+
+        .users-table .col-select {
+            width: 30px;
+        }
+
+        .users-table .col-role {
+            width: 90px;
+            white-space: nowrap;
+        }
+
+        .users-table .col-login {
+            width: 120px;
+        }
+
+        .users-table .col-class,
+        .users-table .col-subjects {
+            width: 130px;
+        }
+
+        /* Кнопки под таблицей (назад / добавить / редактировать / удалить) */
+        .footer-buttons {
+            margin-top: 12px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        .btn-disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        /* Сообщение под таблицей (ошибки / статусы) */
+        .list-message {
+            margin-top: 6px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+
+        /* Модалка для редактирования пользователя */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.35);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 999;
+        }
+
+        .modal {
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+            padding: 16px 18px 18px 18px;
+            max-width: 480px;
+            width: 100%;
+        }
+
+        .modal-title {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        .modal-row {
+            margin-bottom: 10px;
+        }
+
+        .modal-row label {
+            display: block;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+
+        .modal-row input,
+        .modal-row select {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        .modal-footer {
+            margin-top: 10px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .modal-message {
+            font-size: 13px;
+            min-height: 16px;
+            margin-top: 4px;
+            color: #cc0000;
+        }
+
+        /* Общие классы скрытия */
+        .hidden {
+            display: none;
+        }
+        .modal-backdrop.hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<div class="page-container">
+    <!-- Верхняя панель: название подсистемы и ФИО/роль администратора -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">Электронная школа — Администрирование</div>
+            <div class="topbar-user">
+                Роль: <span>Администратор</span>,
+                Пользователь: <span>Иванов Иван Иванович</span>
+                <!-- Позже можно подставлять из profile.cgi / сессии -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Основной контент страницы -->
+    <div class="content">
+        <div class="panel-title">Пользователи</div>
+
+        <!-- Переключатель: чьи записи показывать (ученики / учителя / админы) -->
+        <div class="role-toggle" id="viewRoleToggle">
+            <button type="button" class="role-btn active" data-view="student">Ученики</button>
+            <button type="button" class="role-btn" data-view="teacher">Учителя</button>
+            <button type="button" class="role-btn" data-view="admin">Администраторы</button>
+        </div>
+
+        <!-- Панель фильтров и поиска по загруженному списку -->
+        <div class="filters-bar">
+            <!-- Поиск по ФИО -->
+            <div class="filter-block wide">
+                <label for="searchFio">Поиск по ФИО</label>
+                <input type="text" id="searchFio" placeholder="Начните вводить ФИО...">
+            </div>
+
+            <!-- Фильтр по предмету (для учителей) -->
+            <div class="filter-block hidden" id="teacherSubjectFilterBlock">
+                <label for="teacherSubjectFilter">Фильтр по предмету</label>
+                <select id="teacherSubjectFilter">
+                    <option value="">Все предметы</option>
+                </select>
+            </div>
+
+            <!-- Фильтр по классу (для учеников) — номер и номер+буква -->
+            <div class="filter-block" id="studentClassNumberFilterBlock">
+                <label for="studentClassNumberFilter">Класс (номер)</label>
+                <select id="studentClassNumberFilter">
+                    <option value="">Все</option>
+                </select>
+            </div>
+
+            <div class="filter-block" id="studentClassFullFilterBlock">
+                <label for="studentClassFullFilter">Класс (номер+буква)</label>
+                <select id="studentClassFullFilter">
+                    <option value="">Все</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Таблица пользователей. Шапка фиксирована, <tbody> заполняет JS -->
+        <div class="table-container">
+            <table class="users-table" id="usersTable">
+                <thead>
+                <tr>
+                    <th class="col-select"></th>
+                    <th>ФИО</th>
+                    <th class="col-role">Роль</th>
+                    <th class="col-class">Класс</th>
+                    <th class="col-subjects">Предмет(ы)</th>
+                    <th class="col-login">Логин</th>
+                    <th>E-mail</th>
+                </tr>
+                </thead>
+                <tbody id="usersTableBody">
+                <!-- строки создаются скриптом из JSON -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Сообщения об ошибках/статусе -->
+        <div class="list-message" id="listMessage"></div>
+
+        <!-- Кнопки управления списком пользователей -->
+        <div class="footer-buttons">
+            <!-- Возврат на главную страницу администратора -->
+            <button type="button" class="btn-secondary" id="backBtn">Назад в администрирование</button>
+
+            <!-- Переход на страницу добавления нового пользователя -->
+            <button type="button" class="btn-primary" id="addBtn"
+                    onclick="window.location.href='new_chel.html'">
+                Добавить пользователя
+            </button>
+
+            <!-- Редактирование и удаление выбранной записи -->
+            <button type="button" class="btn-secondary btn-disabled" id="editBtn" disabled>Редактировать</button>
+            <button type="button" class="btn-secondary btn-disabled" id="deleteBtn" disabled>Удалить</button>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно редактирования пользователя (открывается из JS) -->
+<div class="modal-backdrop hidden" id="editModalBackdrop">
+    <div class="modal">
+        <div class="modal-title">Редактирование пользователя</div>
+
+        <div class="modal-row">
+            <label for="editFullName">ФИО</label>
+            <input type="text" id="editFullName">
+        </div>
+
+        <div class="modal-row">
+            <label for="editLogin">Логин</label>
+            <input type="text" id="editLogin">
+        </div>
+
+        <div class="modal-row">
+            <label for="editEmail">E-mail (опционально)</label>
+            <input type="email" id="editEmail">
+        </div>
+
+        <!-- Блоки, которые показываются/скрываются в зависимости от роли -->
+        <div class="modal-row" id="editStudentClassRow">
+            <label for="editStudentClass">Класс</label>
+            <input type="text" id="editStudentClass" placeholder="Например, 5А">
+        </div>
+
+        <div class="modal-row" id="editTeacherSubjectRow">
+            <label for="editTeacherSubjects">Предмет(ы)</label>
+            <input type="text" id="editTeacherSubjects" placeholder="Через запятую, например: Математика, Информатика">
+        </div>
+
+        <div class="modal-row" id="editAdminNotesRow">
+            <label for="editAdminNotes">Примечание (опционально)</label>
+            <input type="text" id="editAdminNotes" placeholder="Ответственный за расписание...">
+        </div>
+
+        <div class="modal-message" id="editModalMessage"></div>
+
+        <div class="modal-footer">
+            <button type="button" class="btn-secondary" id="editCancelBtn">Отмена</button>
+            <button type="button" class="btn-primary" id="editSaveBtn">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        // Флаг "сервер доступен" — если были ошибки, отключаем редактирование/удаление
+        var backendAvailable = false;
+
+        // Массив всех пользователей, пришедших из users_list.cgi
+        var allUsers = [];
+        // Текущий отфильтрованный массив (по роли/ФИО/классу/предмету)
+        var filteredUsers = [];
+        // id выбранного пользователя (строка с радиокнопкой)
+        var selectedUserId = null;
+
+        // Элементы DOM для фильтров, таблицы и кнопок
+        var viewRoleButtons = document.querySelectorAll('#viewRoleToggle .role-btn');
+        var searchFioInput = document.getElementById('searchFio');
+        var teacherSubjectFilterBlock = document.getElementById('teacherSubjectFilterBlock');
+        var teacherSubjectFilter = document.getElementById('teacherSubjectFilter');
+
+        var studentClassNumberFilterBlock = document.getElementById('studentClassNumberFilterBlock');
+        var studentClassFullFilterBlock = document.getElementById('studentClassFullFilterBlock');
+        var studentClassNumberFilter = document.getElementById('studentClassNumberFilter');
+        var studentClassFullFilter = document.getElementById('studentClassFullFilter');
+
+        var usersTableBody = document.getElementById('usersTableBody');
+        var listMessage = document.getElementById('listMessage');
+
+        var backBtn = document.getElementById('backBtn');
+        var editBtn = document.getElementById('editBtn');
+        var deleteBtn = document.getElementById('deleteBtn');
+
+        // Элементы модального окна редактирования
+        var editModalBackdrop = document.getElementById('editModalBackdrop');
+        var editFullName = document.getElementById('editFullName');
+        var editLogin = document.getElementById('editLogin');
+        var editEmail = document.getElementById('editEmail');
+        var editStudentClassRow = document.getElementById('editStudentClassRow');
+        var editStudentClass = document.getElementById('editStudentClass');
+        var editTeacherSubjectRow = document.getElementById('editTeacherSubjectRow');
+        var editTeacherSubjects = document.getElementById('editTeacherSubjects');
+        var editAdminNotesRow = document.getElementById('editAdminNotesRow');
+        var editAdminNotes = document.getElementById('editAdminNotes');
+        var editModalMessage = document.getElementById('editModalMessage');
+        var editCancelBtn = document.getElementById('editCancelBtn');
+        var editSaveBtn = document.getElementById('editSaveBtn');
+
+        // Текущая отображаемая роль (student / teacher / admin)
+        var currentViewRole = 'student';
+
+        //Загрузка списка пользователей из CGI
+        function loadUsers() {
+            listMessage.style.color = '#cc0000';
+            listMessage.textContent = 'Загрузка пользователей...';
+
+            fetch('/cgi-bin/users_list.cgi')
+                .then(function (res) {
+                    if (!res.ok) {
+                        throw new Error('HTTP ' + res.status);
+                    }
+                    return res.json();
+                })
+                .then(function (data) {
+                    backendAvailable = true;
+
+                    if (!Array.isArray(data)) {
+                        throw new Error('Некорректный ответ сервера');
+                    }
+
+                    // Сохраняем данные и строим фильтры + таблицу
+                    allUsers = data;
+                    buildFiltersFromData();
+                    applyFiltersAndRender();
+                    listMessage.textContent = '';
+                })
+                .catch(function () {
+                    // Если сервер упал или CGI не реализовано — показываем сообщение
+                    backendAvailable = false;
+                    allUsers = [];
+                    filteredUsers = [];
+                    usersTableBody.innerHTML = '';
+                    var tr = document.createElement('tr');
+                    var td = document.createElement('td');
+                    td.colSpan = 7;
+                    td.textContent = 'Сервер пользователей недоступен или произошла ошибка загрузки.';
+                    tr.appendChild(td);
+                    usersTableBody.appendChild(tr);
+
+                    updateActionButtonsState();
+                    listMessage.style.color = '#cc0000';
+                    listMessage.textContent = 'Не удалось получить данные с /cgi-bin/users_list.cgi. Обратитесь к администратору.';
+                });
+        }
+
+        //Построение списков для фильтров из полученных данных
+        function buildFiltersFromData() {
+            // Предметы для учителей
+            var subjectsSet = new Set();
+            allUsers.forEach(function (u) {
+                if (u.role === 'teacher' && Array.isArray(u.subjects)) {
+                    u.subjects.forEach(function (s) {
+                        if (s && typeof s === 'string') {
+                            subjectsSet.add(s);
+                        }
+                    });
+                }
+            });
+
+            teacherSubjectFilter.innerHTML = '';
+            var optAll = document.createElement('option');
+            optAll.value = '';
+            optAll.textContent = 'Все предметы';
+            teacherSubjectFilter.appendChild(optAll);
+
+            Array.from(subjectsSet).sort().forEach(function (s) {
+                var opt = document.createElement('option');
+                opt.value = s;
+                opt.textContent = s;
+                teacherSubjectFilter.appendChild(opt);
+            });
+
+            // Классы для учеников
+            var classNamesSet = new Set();
+            var classNumbersSet = new Set();
+
+            allUsers.forEach(function (u) {
+                if (u.role === 'student' && u.className) {
+                    classNamesSet.add(u.className);
+                    var m = String(u.className).match(/^(\d+)/);
+                    if (m) {
+                        classNumbersSet.add(m[1]);
+                    }
+                }
+            });
+
+            studentClassNumberFilter.innerHTML = '';
+            var cnAll = document.createElement('option');
+            cnAll.value = '';
+            cnAll.textContent = 'Все';
+            studentClassNumberFilter.appendChild(cnAll);
+
+            Array.from(classNumbersSet).sort(function (a, b) {
+                return Number(a) - Number(b);
+            }).forEach(function (n) {
+                var opt = document.createElement('option');
+                opt.value = n;
+                opt.textContent = n;
+                studentClassNumberFilter.appendChild(opt);
+            });
+
+            studentClassFullFilter.innerHTML = '';
+            var cfAll = document.createElement('option');
+            cfAll.value = '';
+            cfAll.textContent = 'Все';
+            studentClassFullFilter.appendChild(cfAll);
+
+            Array.from(classNamesSet).sort().forEach(function (name) {
+                var opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                studentClassFullFilter.appendChild(opt);
+            });
+        }
+
+        //Применение фильтров к allUsers и перерисовка таблицы
+        function applyFiltersAndRender() {
+            selectedUserId = null;
+            updateActionButtonsState();
+
+            var fioQuery = searchFioInput.value.trim().toLowerCase();
+            var subjectFilter = teacherSubjectFilter.value;
+            var classNumberFilterVal = studentClassNumberFilter.value;
+            var classFullFilterVal = studentClassFullFilter.value;
+
+            filteredUsers = allUsers.filter(function (u) {
+                // Фильтруем по роли (текущая вкладка)
+                if (u.role !== currentViewRole) return false;
+
+                // Поиск по ФИО
+                if (fioQuery && (!u.fullName || u.fullName.toLowerCase().indexOf(fioQuery) === -1)) {
+                    return false;
+                }
+
+                // Доп фильтр по предмету для учителей
+                if (currentViewRole === 'teacher' && subjectFilter) {
+                    if (!Array.isArray(u.subjects) || u.subjects.indexOf(subjectFilter) === -1) {
+                        return false;
+                    }
+                }
+
+                // Доп фильтр по классам для учеников
+                if (currentViewRole === 'student') {
+                    if (classNumberFilterVal) {
+                        if (!u.className || String(u.className).indexOf(classNumberFilterVal) !== 0) {
+                            return false;
+                        }
+                    }
+                    if (classFullFilterVal) {
+                        if (!u.className || u.className !== classFullFilterVal) {
+                            return false;
+                        }
+                    }
+                }
+
+                return true;
+            });
+
+            // Сортируем по ФИО
+            filteredUsers.sort(function (a, b) {
+                var aName = (a.fullName || '').toLowerCase();
+                var bName = (b.fullName || '').toLowerCase();
+                if (aName < bName) return -1;
+                if (aName > bName) return 1;
+                return 0;
+            });
+
+            renderTable();
+        }
+
+        // Отрисовка <tbody> по filteredUsers
+        function renderTable() {
+            usersTableBody.innerHTML = '';
+            if (filteredUsers.length === 0) {
+                var tr = document.createElement('tr');
+                var td = document.createElement('td');
+                td.colSpan = 7;
+                td.textContent = backendAvailable
+                    ? 'Нет пользователей по заданным условиям.'
+                    : 'Сервер пользователей недоступен или произошла ошибка.';
+                tr.appendChild(td);
+                usersTableBody.appendChild(tr);
+                return;
+            }
+
+            filteredUsers.forEach(function (u) {
+                var tr = document.createElement('tr');
+                tr.setAttribute('data-id', u.id);
+
+                // Колонка с радиокнопкой выбора
+                var tdSelect = document.createElement('td');
+                tdSelect.className = 'col-select';
+                var radio = document.createElement('input');
+                radio.type = 'radio';
+                radio.name = 'userSelect';
+                radio.value = u.id;
+                tdSelect.appendChild(radio);
+                tr.appendChild(tdSelect);
+
+                // ФИО
+                var tdFullName = document.createElement('td');
+                tdFullName.textContent = u.fullName || '';
+                tr.appendChild(tdFullName);
+
+                // Человекочитаемая роль
+                var tdRole = document.createElement('td');
+                tdRole.className = 'col-role';
+                if (u.role === 'student') tdRole.textContent = 'Ученик';
+                else if (u.role === 'teacher') tdRole.textContent = 'Учитель';
+                else if (u.role === 'admin') tdRole.textContent = 'Администратор';
+                else tdRole.textContent = u.role || '';
+                tr.appendChild(tdRole);
+
+                // Класс (для ученика)
+                var tdClass = document.createElement('td');
+                tdClass.className = 'col-class';
+                tdClass.textContent = u.className || '';
+                tr.appendChild(tdClass);
+
+                // Предметы (для учителя)
+                var tdSubjects = document.createElement('td');
+                tdSubjects.className = 'col-subjects';
+                if (Array.isArray(u.subjects)) {
+                    tdSubjects.textContent = u.subjects.join(', ');
+                } else {
+                    tdSubjects.textContent = '';
+                }
+                tr.appendChild(tdSubjects);
+
+                // Логин
+                var tdLogin = document.createElement('td');
+                tdLogin.className = 'col-login';
+                tdLogin.textContent = u.login || '';
+                tr.appendChild(tdLogin);
+
+                // E-mail
+                var tdEmail = document.createElement('td');
+                tdEmail.textContent = u.email || '';
+                tr.appendChild(tdEmail);
+
+                // Клик по строке — выбор пользователя
+                tr.addEventListener('click', function (e) {
+                    if (e.target.tagName.toLowerCase() !== 'input') {
+                        radio.checked = true;
+                    }
+                    selectedUserId = u.id;
+                    updateRowSelection();
+                    updateActionButtonsState();
+                });
+
+                // Клик по радио — тоже выбор
+                radio.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    selectedUserId = u.id;
+                    updateRowSelection();
+                    updateActionButtonsState();
+                });
+
+                usersTableBody.appendChild(tr);
+            });
+
+            updateRowSelection();
+        }
+
+        // Подсветка выбранной строки в таблице
+        function updateRowSelection() {
+            var rows = usersTableBody.querySelectorAll('tr');
+            rows.forEach(function (tr) {
+                var id = tr.getAttribute('data-id');
+                if (id && Number(id) === Number(selectedUserId)) {
+                    tr.classList.add('selected');
+                    var radio = tr.querySelector('input[type="radio"]');
+                    if (radio) radio.checked = true;
+                } else {
+                    tr.classList.remove('selected');
+                    var radio2 = tr.querySelector('input[type="radio"]');
+                    if (radio2) radio2.checked = false;
+                }
+            });
+        }
+
+        // Включаем/отключаем кнопки "Редактировать" и "Удалить"
+        function updateActionButtonsState() {
+            var disabled = !selectedUserId || !backendAvailable;
+            editBtn.disabled = disabled;
+            deleteBtn.disabled = disabled;
+            if (disabled) {
+                editBtn.classList.add('btn-disabled');
+                deleteBtn.classList.add('btn-disabled');
+            } else {
+                editBtn.classList.remove('btn-disabled');
+                deleteBtn.classList.remove('btn-disabled');
+            }
+        }
+
+        //Переключение вкладок "Ученики / Учителя / Админы"
+        viewRoleButtons.forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var view = btn.getAttribute('data-view');
+                currentViewRole = view;
+
+                viewRoleButtons.forEach(function (b) {
+                    b.classList.remove('active');
+                });
+                btn.classList.add('active');
+
+                // Показываем/прячем фильтры в зависимости от роли
+                if (currentViewRole === 'teacher') {
+                    teacherSubjectFilterBlock.classList.remove('hidden');
+                    studentClassNumberFilterBlock.classList.add('hidden');
+                    studentClassFullFilterBlock.classList.add('hidden');
+                } else if (currentViewRole === 'student') {
+                    teacherSubjectFilterBlock.classList.add('hidden');
+                    studentClassNumberFilterBlock.classList.remove('hidden');
+                    studentClassFullFilterBlock.classList.remove('hidden');
+                } else {
+                    teacherSubjectFilterBlock.classList.add('hidden');
+                    studentClassNumberFilterBlock.classList.add('hidden');
+                    studentClassFullFilterBlock.classList.add('hidden');
+                }
+
+                applyFiltersAndRender();
+            });
+        });
+
+        //Обработчики фильтров и поиска
+
+        searchFioInput.addEventListener('input', applyFiltersAndRender);
+        teacherSubjectFilter.addEventListener('change', applyFiltersAndRender);
+        studentClassNumberFilter.addEventListener('change', applyFiltersAndRender);
+        studentClassFullFilter.addEventListener('change', applyFiltersAndRender);
+
+        // Кнопка "Назад в администрирование"
+        backBtn.addEventListener('click', function () {
+            window.location.href = 'main_admin.html';
+        });
+
+        //Удаление пользователя через delete_user.cgi
+        deleteBtn.addEventListener('click', function () {
+            if (!backendAvailable) {
+                alert('Удаление недоступно: сервер пользователей недоступен.');
+                return;
+            }
+            if (!selectedUserId) return;
+
+            if (!confirm('Удалить выбранного пользователя? Действие необратимо.')) {
+                return;
+            }
+
+            var params = new URLSearchParams();
+            params.append('id', selectedUserId);
+
+            fetch('/cgi-bin/delete_user.cgi', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: params.toString()
+            })
+                .then(function (res) {
+                    if (!res.ok) {
+                        throw new Error('HTTP ' + res.status);
+                    }
+                    // Удаляем пользователя из локального массива allUsers
+                    allUsers = allUsers.filter(function (u) {
+                        return Number(u.id) !== Number(selectedUserId);
+                    });
+                    applyFiltersAndRender();
+                    listMessage.style.color = '#007700';
+                    listMessage.textContent = 'Пользователь удалён.';
+                })
+                .catch(function (err) {
+                    listMessage.style.color = '#cc0000';
+                    listMessage.textContent = 'Ошибка при удалении пользователя: ' + err.message;
+                });
+        });
+
+        /* Редактирование пользователя через edit_user.cgi*/
+        editBtn.addEventListener('click', function () {
+            if (!backendAvailable) {
+                alert('Редактирование недоступно: сервер пользователей недоступен.');
+                return;
+            }
+            if (!selectedUserId) return;
+            var user = allUsers.find(function (u) {
+                return Number(u.id) === Number(selectedUserId);
+            });
+            if (!user) return;
+
+            openEditModal(user);
+        });
+
+        // Открытие модального окна и заполнение его данными пользователя
+        function openEditModal(user) {
+            editModalMessage.textContent = '';
+            editModalMessage.style.color = '#cc0000';
+
+            editFullName.value = user.fullName || '';
+            editLogin.value = user.login || '';
+            editEmail.value = user.email || '';
+
+            // Скрываем все спец поля. Потом покажем нужные по роли
+            editStudentClassRow.style.display = 'none';
+            editTeacherSubjectRow.style.display = 'none';
+            editAdminNotesRow.style.display = 'none';
+
+            if (user.role === 'student') {
+                editStudentClassRow.style.display = 'block';
+                editStudentClass.value = user.className || '';
+            }
+
+            if (user.role === 'teacher') {
+                editTeacherSubjectRow.style.display = 'block';
+                if (Array.isArray(user.subjects)) {
+                    editTeacherSubjects.value = user.subjects.join(', ');
+                } else {
+                    editTeacherSubjects.value = '';
+                }
+            }
+
+            if (user.role === 'admin') {
+                editAdminNotesRow.style.display = 'block';
+                editAdminNotes.value = user.adminNotes || '';
+            }
+
+            editModalBackdrop.classList.remove('hidden');
+        }
+
+        // Закрытие модального окна
+        function closeEditModal() {
+            editModalBackdrop.classList.add('hidden');
+        }
+
+        editCancelBtn.addEventListener('click', closeEditModal);
+
+        // Закрываем модалку по клику по фону
+        editModalBackdrop.addEventListener('click', function (e) {
+            if (e.target === editModalBackdrop) {
+                closeEditModal();
+            }
+        });
+
+        // Сохранение изменений пользователя (отправка на edit_user.cgi)
+        editSaveBtn.addEventListener('click', function () {
+            if (!backendAvailable) {
+                alert('Сохранение изменений недоступно: сервер пользователей недоступен.');
+                return;
+            }
+            if (!selectedUserId) return;
+            var user = allUsers.find(function (u) {
+                return Number(u.id) === Number(selectedUserId);
+            });
+            if (!user) return;
+
+            var fullName = editFullName.value.trim();
+            var login = editLogin.value.trim();
+            var email = editEmail.value.trim();
+
+            if (!fullName) {
+                editModalMessage.textContent = 'ФИО не может быть пустым.';
+                return;
+            }
+            if (!login) {
+                editModalMessage.textContent = 'Логин не может быть пустым.';
+                return;
+            }
+
+            var className = user.className || '';
+            var subjectsStr = '';
+            var adminNotes = user.adminNotes || '';
+
+            if (user.role === 'student') {
+                className = editStudentClass.value.trim();
+            }
+            if (user.role === 'teacher') {
+                subjectsStr = editTeacherSubjects.value.trim();
+            }
+            if (user.role === 'admin') {
+                adminNotes = editAdminNotes.value.trim();
+            }
+
+            var params = new URLSearchParams();
+            params.append('id', user.id);
+            params.append('fullName', fullName);
+            params.append('login', login);
+            params.append('email', email);
+            if (user.role === 'student') params.append('className', className);
+            if (user.role === 'teacher') params.append('subjects', subjectsStr);
+            if (user.role === 'admin') params.append('adminNotes', adminNotes);
+
+            fetch('/cgi-bin/edit_user.cgi', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: params.toString()
+            })
+                .then(function (res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+                    // Обновляем локальные данные пользователя
+                    user.fullName = fullName;
+                    user.login = login;
+                    user.email = email;
+                    if (user.role === 'student') user.className = className;
+                    if (user.role === 'teacher') {
+                        if (subjectsStr) {
+                            user.subjects = subjectsStr.split(',')
+                                .map(function (s) { return s.trim(); })
+                                .filter(Boolean);
+                        } else {
+                            user.subjects = [];
+                        }
+                    }
+                    if (user.role === 'admin') user.adminNotes = adminNotes;
+
+                    closeEditModal();
+                    buildFiltersFromData();
+                    applyFiltersAndRender();
+
+                    listMessage.style.color = '#007700';
+                    listMessage.textContent = 'Изменения сохранены.';
+                })
+                .catch(function (err) {
+                    editModalMessage.textContent = 'Ошибка при сохранении: ' + err.message;
+                });
+        });
+
+        // Инициализация загрузка данных при открытии страницы
+        teacherSubjectFilterBlock.classList.add('hidden');
+        studentClassNumberFilterBlock.classList.remove('hidden');
+        studentClassFullFilterBlock.classList.remove('hidden');
+        editModalBackdrop.classList.add('hidden');
+
+        loadUsers();
+    })();
+</script>
+</body>
+</html>

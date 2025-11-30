@@ -1,0 +1,536 @@
+<!--
+    ДОМАШНИЕ ЗАДАНИЯ ДЛЯ УЧЕНИКА 
+      homework:
+        id              INTEGER PK
+        class_name      TEXT            -- для какого класса выдано задание
+        subject         TEXT
+        teacher_id      INTEGER
+        teacher_fio     TEXT
+        title           TEXT            -- краткое задание / тема
+        description     TEXT            -- подробное условие (на отдельной странице)
+        deadline        TEXT            -- дедлайн, ISO-строка: "2025-09-05T23:59"
+        created_at      TEXT
+
+      homework_submissions:
+        id              INTEGER PK
+        homework_id     INTEGER (homework.id)
+        student_id      INTEGER (users.id)
+        status          TEXT            -- 'assigned','submitted','accepted','rejected'
+        status_text     TEXT            -- человекочитаемый статус для фронта
+        grade           REAL            -- оценка за ДЗ (может быть NULL)
+        submitted_at    TEXT
+        checked_at      TEXT
+
+
+    1) /cgi-bin/profile.cgi (GET)
+       • Определить по сессии текущего пользователя.
+       • Проверить, что role_code = 'student'.
+       • Вернуть JSON вида:
+         {
+           "user_id":   123,
+           "fio":       "Петров Иван Иванович",
+           "role":      "Ученик",
+           "role_code": "student",
+           "class_name":"7Б"
+         }
+       • Если сессии нет/роль не student — 401/ошибка.
+
+
+    2) /cgi-bin/student_homework_list.cgi (GET)
+       СПИСОК ДОМАШНИХ ЗАДАНИЙ ДЛЯ КОНКРЕТНОГО УЧЕНИКА.
+
+       • По сессии определяем:
+           - student_id
+           - class_name ученика (например, "7Б")
+
+       • В SQL/логике CGI:
+           - выбираем все записи из homework для его class_name
+             (и, если нужно, общешкольные ДЗ, если такие предусмотрены);
+           - джойним (или отдельным запросом подтягиваем) записи
+             homework_submissions по (homework_id, student_id),
+             чтобы знать статус и оценку именно ЭТОГО ученика.
+
+       • На выход отдаём список уже "сшитых" данных, например:
+         {
+           "homework": [
+             {
+               "id":          10,
+               "subject":     "Математика",
+               "teacher":     "Иванов И.И.",                -- из teacher_fio
+               "title":       "Упр. 1-10, стр. 15",
+               "deadline":    "2025-09-05T23:59",           -- ISO-строка
+               "status":      "submitted",                  -- код статуса
+               "status_text": "Отправлено, ожидает проверки",
+               "grade":       null                          -- оценка за ДЗ (если уже есть)
+             },
+             ...
+           ]
+         }
+
+       • СТРАНИЦА ТОЛЬКО ПОКАЗЫВАЕТ список: никаких полей для редактирования/отправки.
+
+
+    3) student_homework_view.html?homework_id=...
+       Отдельная страница (не здесь) для просмотра/отправки конкретного ДЗ.
+       При клике по строке таблицы фронт переходит туда:
+
+         student_homework_view.html?homework_id={id}
+
+
+     НЕ доверять данным с клиента: какие ДЗ показывать, статус, оценку —
+      определяет только CGI по сессии и базе.
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Домашние задания — Ученик</title>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Центральная "карточка" страницы */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель с заголовком и ФИО ученика */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Белые кнопки с фиолетовой рамкой (второстепенные действия) */
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        /* Панель управления: обновить, фильтры по предмету/статусу/дедлайну */
+        .controls {
+            margin-bottom: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .controls select {
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 13px;
+        }
+
+        /* Обёртка для таблицы ДЗ (на случай горизонтальной прокрутки) */
+        .homework-wrapper {
+            overflow-x: auto;
+        }
+
+        /* Таблица со списком ДЗ */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        /* Подсветка строки при наведении, так как по клику — переход в подробный просмотр */
+        tr.clickable:hover {
+            background: #f7e3f7;
+            cursor: pointer;
+        }
+
+        /* Блок для сообщений страницы (ошибки, подсказки) */
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <!-- Верхняя панель: раздел "Домашние задания" + ФИО и класс ученика -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Домашние задания
+            </div>
+            <div class="topbar-user">
+                Ученик: <span id="user-fio">ФИО</span>,
+                Класс: <span id="user-class">5А</span>
+            </div>
+        </div>
+
+        <!-- Переход обратно на главное меню ученика -->
+        <button class="btn-secondary" id="btn-back">На главную</button>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Домашние задания</div>
+
+        <!-- Панель фильтров и кнопка "Обновить" -->
+        <div class="controls">
+            <button class="btn-secondary" id="btn-reload">Обновить</button>
+
+            <label>
+                Предмет:
+                <!-- Фильтр по предмету, список предметов подставляется из данных -->
+                <select id="filter-subject">
+                    <option value="">Все</option>
+                    <!-- подставится список предметов из данных -->
+                </select>
+            </label>
+
+            <label>
+                Сортировать по дедлайну:
+                <!-- Выбор порядка сортировки по сроку сдачи -->
+                <select id="sort-deadline">
+                    <option value="asc">Сначала ближайшие</option>
+                    <option value="desc">Сначала дальние</option>
+                </select>
+            </label>
+
+            <label>
+                Статус:
+                <!-- Фильтр по статусу выполнения ДЗ -->
+                <select id="filter-status">
+                    <option value="">Все</option>
+                    <option value="assigned">Не отправлено</option>
+                    <option value="submitted">Отправлено</option>
+                    <option value="accepted">Принято</option>
+                    <option value="rejected">Отклонено</option>
+                </select>
+            </label>
+        </div>
+
+        <!-- Сообщения об ошибках/отсутствии данных -->
+        <div class="page-message" id="page-message"></div>
+
+        <!-- Таблица со всеми ДЗ (отображение только, без редактирования) -->
+        <div class="homework-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Предмет</th>
+                        <th>Учитель</th>
+                        <th>Тема</th>
+                        <th>Дедлайн</th>
+                        <th>Статус</th>
+                        <th>Оценка</th>
+                    </tr>
+                </thead>
+                <tbody id="homework-body">
+                    <!-- строки д/з создаются динамически в JS -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Информация о текущем пользователе (ученике), заполняется из profile.cgi
+    const currentUser = {
+        userId: null,
+        fio: "",
+        className: "",
+        roleCode: "student"
+    };
+
+    // Массив всех загруженных с бэка ДЗ (для фильтрации/сортировки)
+    let allHomework = [];
+
+    // Загрузка профиля ученика из /cgi-bin/profile.cgi.
+    // Если CGI ещё не реализован — используем тестовую заглушку.
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId    = data.user_id || null;
+                currentUser.fio       = data.fio || "";
+                currentUser.className = data.class_name || "";
+                currentUser.roleCode  = data.role_code || "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio || "ФИО (тест)";
+                document.getElementById("user-class").textContent = currentUser.className || "5А";
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если profile.cgi ещё нет/не отвечает
+                currentUser.userId    = 100;
+                currentUser.fio       = "Тестовый Ученик";
+                currentUser.className = "7Б";
+                currentUser.roleCode  = "student";
+
+                document.getElementById("user-fio").textContent   = currentUser.fio;
+                document.getElementById("user-class").textContent = currentUser.className;
+            });
+    }
+
+    // Загрузка списка ДЗ для ученика:
+    //   /cgi-bin/student_homework_list.cgi
+    // CGI уже учитывает ученика и его класс по сессии.
+    function loadHomework() {
+        const tbody = document.getElementById("homework-body");
+        const pageMessage = document.getElementById("page-message");
+        tbody.innerHTML = "";
+        pageMessage.textContent = "";
+
+        fetch("/cgi-bin/student_homework_list.cgi")
+            .then(res => res.json())
+            .then(data => {
+                const list = data.homework || [];
+                allHomework = list;
+                // Отрисовываем таблицу с учётом фильтров/сортировки
+                renderHomeworkTable();
+                // Обновляем список предметов в фильтре
+                fillSubjectFilter();
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если student_homework_list.cgi ещё нет
+                allHomework = [
+                    {
+                        id: 10,
+                        subject: "Математика",
+                        teacher: "Иванов И.И.",
+                        title: "Упр. 1-10, стр. 15",
+                        deadline: "2025-09-05T23:59",
+                        status: "submitted",
+                        status_text: "Отправлено, ожидает проверки",
+                        grade: null
+                    },
+                    {
+                        id: 11,
+                        subject: "История",
+                        teacher: "Петров П.П.",
+                        title: "Глава 2",
+                        deadline: "2025-09-03T23:59",
+                        status: "accepted",
+                        status_text: "Проверено, принято",
+                        grade: 5
+                    }
+                ];
+                renderHomeworkTable();
+                fillSubjectFilter();
+            });
+    }
+
+    // Отрисовать таблицу ДЗ с учётом фильтров (предмет/статус) и порядка сортировки по дедлайну
+    function renderHomeworkTable() {
+        const tbody = document.getElementById("homework-body");
+        const filterSubject = document.getElementById("filter-subject").value;
+        const filterStatus  = document.getElementById("filter-status").value;
+        const sortDeadline  = document.getElementById("sort-deadline").value;
+
+        tbody.innerHTML = "";
+
+        let list = [...allHomework];
+
+        // Фильтруем по предмету (если выбран не "Все")
+        if (filterSubject) {
+            list = list.filter(h => h.subject === filterSubject);
+        }
+        // Фильтруем по статусу (если выбран не "Все")
+        if (filterStatus) {
+            list = list.filter(h => h.status === filterStatus);
+        }
+
+        // Сортируем по полю deadline (строка ISO, поэтому можно localeCompare)
+        list.sort((a, b) => {
+            const da = a.deadline || "";
+            const db = b.deadline || "";
+            if (sortDeadline === "asc") {
+                return da.localeCompare(db);
+            } else {
+                return db.localeCompare(da);
+            }
+        });
+
+        // Если после фильтров ДЗ нет — выводим одну строку-заглушку
+        if (!list.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 6;
+            td.textContent = "Домашние задания отсутствуют.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+        }
+
+        // Строим строки по каждому ДЗ
+        list.forEach(item => {
+            const tr = document.createElement("tr");
+            tr.classList.add("clickable");
+
+            // При клике по строке переходим на страницу подробного просмотра/отправки ДЗ
+            tr.addEventListener("click", () => {
+                window.location.href = "student_homework_view.html?homework_id=" + encodeURIComponent(item.id);
+            });
+
+            const tdSub = document.createElement("td");
+            tdSub.textContent = item.subject || "";
+            tr.appendChild(tdSub);
+
+            const tdTeacher = document.createElement("td");
+            tdTeacher.textContent = item.teacher || "";
+            tr.appendChild(tdTeacher);
+
+            const tdTitle = document.createElement("td");
+            tdTitle.textContent = item.title || "";
+            tr.appendChild(tdTitle);
+
+            const tdDeadline = document.createElement("td");
+            tdDeadline.textContent = item.deadline || "";
+            tr.appendChild(tdDeadline);
+
+            const tdStatus = document.createElement("td");
+            tdStatus.textContent = item.status_text || item.status || "";
+            tr.appendChild(tdStatus);
+
+            const tdGrade = document.createElement("td");
+            tdGrade.textContent = (item.grade != null ? item.grade : "");
+            tr.appendChild(tdGrade);
+
+            tbody.appendChild(tr);
+        });
+    }
+
+    // Заполнить выпадающий список "Предмет" уникальными значениями из allHomework
+    function fillSubjectFilter() {
+        const select = document.getElementById("filter-subject");
+        if (!select) return;
+
+        const subjects = Array.from(
+            new Set(allHomework.map(h => h.subject).filter(Boolean))
+        ).sort((a, b) => a.localeCompare(b, "ru"));
+
+        const currentVal = select.value;
+        select.innerHTML = "";
+
+        const optAll = document.createElement("option");
+        optAll.value = "";
+        optAll.textContent = "Все";
+        select.appendChild(optAll);
+
+        subjects.forEach(sub => {
+            const opt = document.createElement("option");
+            opt.value = sub;
+            opt.textContent = sub;
+            select.appendChild(opt);
+        });
+
+        // Пытаемся сохранить предыдущий выбор, если он всё ещё есть
+        if (currentVal) {
+            select.value = currentVal;
+        }
+    }
+
+    // Инициализация страницы: вешаем обработчики и загружаем данные
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnBack   = document.getElementById("btn-back");
+        const btnReload = document.getElementById("btn-reload");
+        const filterSub = document.getElementById("filter-subject");
+        const filterSta = document.getElementById("filter-status");
+        const sortDead  = document.getElementById("sort-deadline");
+
+        // Кнопка "На главную" → переход к меню ученика
+        if (btnBack) {
+            btnBack.addEventListener("click", () => {
+                window.location.href = "student_menu.html";
+            });
+        }
+        // Кнопка "Обновить" → повторный запрос списка ДЗ с бэка
+        if (btnReload) {
+            btnReload.addEventListener("click", loadHomework);
+        }
+        // Перерисовываем таблицу при изменении любого фильтра/сортировки
+        if (filterSub) {
+            filterSub.addEventListener("change", renderHomeworkTable);
+        }
+        if (filterSta) {
+            filterSta.addEventListener("change", renderHomeworkTable);
+        }
+        if (sortDead) {
+            sortDead.addEventListener("change", renderHomeworkTable);
+        }
+
+        // Стартовая загрузка: профиль ученика + список ДЗ
+        loadUserInfo();
+        loadHomework();
+    });
+</script>
+
+</body>
+</html>

@@ -1,0 +1,713 @@
+<!--
+    check_homework.html
+    Страница проверки КОНКРЕТНОГО домашнего задания КОНКРЕТНОГО ученика.
+    Страница предназначена для УЧИТЕЛЯ.
+
+    ОЖИДАЕМЫЕ ПАРАМЕТРЫ В URL:
+      check_homework.html?homework_id=55&student_id=10
+
+      homework_id  – ID домашнего задания (таблица homework)
+      student_id   – ID ученика (таблица students)
+
+    ОСНОВНЫЕ ТАБЛИЦЫ (примерная структура, для понимания логики CGI):
+
+    users:
+      id          INTEGER PK
+      login       TEXT
+      fio         TEXT
+      role_code   TEXT   -- 'admin', 'teacher', ...
+
+    homework:
+      id              INTEGER PK AUTOINCREMENT
+      teacher_id      INTEGER        -- users.id (кто задал ДЗ)
+      class_name      TEXT           -- "5А", "7Б" и т.п.
+      subject         TEXT
+      title           TEXT           -- тема ДЗ
+      description     TEXT
+      deadline        TEXT           -- "YYYY-MM-DD HH:MM"
+      file_path       TEXT           -- файл от учителя (задание)
+      created_at      TEXT
+      updated_at      TEXT
+
+    students:
+      id          INTEGER PK
+      fio         TEXT
+      class_name  TEXT
+
+    homework_submissions:
+      id              INTEGER PK AUTOINCREMENT
+      homework_id     INTEGER        -- homework.id
+      student_id      INTEGER        -- students.id
+      student_file    TEXT           -- путь к файлу решения ученика (может быть NULL)
+      submitted_at    TEXT           -- дата фактической сдачи (если ученик сдал)
+      status          TEXT           -- 'pending', 'accepted', 'rejected'
+      grade           TEXT           -- "5", "4", "зачёт", ...
+      comment         TEXT           -- комментарий учителя
+      checked_at      TEXT           -- дата проверки/оценивания (ставится CGI "сейчас")
+
+
+
+    1) /cgi-bin/profile.cgi   (GET)
+       Определяет текущего пользователя (учителя).
+       ОТДАЁТ JSON:
+       {
+         "user_id":   5,
+         "role":      "Учитель",
+         "role_code": "teacher",
+         "fio":       "Иванов Иван Иванович"
+       }
+
+       CGI по проверке ДЗ обязательно использует user_id и role_code
+       для проверки прав: учитель может проверять ТОЛЬКО свои заданные ДЗ.
+
+
+
+    2) /cgi-bin/homework_check_data.cgi   (GET)
+       Возвращает полную информацию по ДЗ и одному ученику.
+       ПАРАМЕТРЫ (query string):
+         homework_id=55
+         student_id=10
+
+       НА СТОРОНЕ CGI (примерная логика):
+         current_user = из сессии
+
+       ОТДАЁТ JSON:
+       {
+         "ok": true,
+         "homework": {
+           "id": 55,
+           "class_name": "5А",
+           "subject": "Математика",
+           "title": "Уравнения",
+           "description": "Решить №1-10",
+           "deadline": "2025-12-05 23:59",
+           "teacher_file_url": "/files/hw/55/task.pdf"
+         },
+         "student": {
+           "id": 10,
+           "fio": "Петров Пётр",
+           "class_name": "5А"
+         },
+         "submission": {
+           "status": "pending",  // 'pending' / 'accepted' / 'rejected'
+           "grade": "",
+           "comment": "",
+           "submitted_at": null,
+           "checked_at": null,
+           "student_file_url": "/files/hw_submissions/123.pdf"
+         }
+       }
+
+
+    3) /cgi-bin/homework_check_save.cgi   (POST, JSON)
+       Сохраняет результат проверки учителем.
+
+       ФРОНТ ОТПРАВЛЯЕТ JSON:
+       {
+         "homework_id": 55,
+         "student_id": 10,
+         "status": "accepted",    // 'accepted' / 'rejected' / 'pending'
+         "grade": "5",
+         "comment": "Молодец"
+       }
+
+
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Проверка домашнего задания — Учитель</title>
+
+    <style>
+        /* Общие стили страницы: фон, шрифт */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Центральный контейнер всей страницы (карточка) */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя панель: название + информация о пользователе + мини-навигация */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        /* Кнопки навигации в верхней панели (Домашние задания / Материалы / Оповещения) */
+        .topbar-nav {
+            display: flex;
+            gap: 8px;
+        }
+
+        .nav-btn {
+            padding: 6px 12px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: none;
+            border-radius: 20px;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .nav-btn.active {
+            background: #770f77;
+            color: #ffffff;
+        }
+
+        .nav-btn:hover {
+            background: #f0d1f0;
+        }
+
+        /* Основной контент */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Общий стиль "карточек"-блоков */
+        .block {
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+            padding: 14px 16px;
+            margin-bottom: 14px;
+            font-size: 14px;
+        }
+
+        .block-title {
+            font-weight: bold;
+            margin-bottom: 6px;
+            color: #660066;
+        }
+
+        .block-row {
+            margin-bottom: 4px;
+        }
+
+        .block-row span.label {
+            font-weight: bold;
+        }
+
+        /* Ссылки на файлы учителя / ученика */
+        .link-file {
+            color: #0066cc;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+
+        /* Строка со статусом и оценкой (селект + input) */
+        .status-select-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin-top: 8px;
+        }
+
+        .status-select-row select,
+        .status-select-row input {
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+        }
+
+        /* Текстовое поле комментария */
+        .block textarea {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 60px;
+            box-sizing: border-box;
+            margin-top: 6px;
+        }
+
+        /* Подсветка ошибки для поля */
+        .field-error {
+            border: 2px solid #ff4d4d !important;
+        }
+
+        /* Кнопки внизу страницы */
+        .footer-buttons {
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        /* Сообщение об ошибке / успехе (под блоками) */
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Проверка домашнего задания
+            </div>
+            <div class="topbar-user">
+                Роль: <span id="user-role">Учитель</span>,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+        <div class="topbar-nav">
+            <button class="nav-btn" id="nav-homework">Домашние задания</button>
+            <button class="nav-btn" id="nav-materials">Материалы</button>
+            <button class="nav-btn" id="nav-notifications">Оповещения</button>
+        </div>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Проверка домашнего задания</div>
+
+        <!-- Блок с информацией о ДЗ (заполняется из homework_check_data.cgi) -->
+        <div class="block" id="block-homework">
+            <div class="block-title">Домашнее задание</div>
+            <div class="block-row"><span class="label">Класс:</span> <span id="hw-class">—</span></div>
+            <div class="block-row"><span class="label">Предмет:</span> <span id="hw-subject">—</span></div>
+            <div class="block-row"><span class="label">Тема:</span> <span id="hw-title">—</span></div>
+            <div class="block-row"><span class="label">Дедлайн:</span> <span id="hw-deadline">—</span></div>
+            <div class="block-row"><span class="label">Описание:</span> <span id="hw-desc">—</span></div>
+            <div class="block-row"><span class="label">Файл учителя:</span> <span id="hw-file">—</span></div>
+        </div>
+
+        <!-- Блок с информацией об ученике и его сдаче -->
+        <div class="block" id="block-student">
+            <div class="block-title">Ученик</div>
+            <div class="block-row"><span class="label">ФИО:</span> <span id="st-fio">—</span></div>
+            <div class="block-row"><span class="label">Класс:</span> <span id="st-class">—</span></div>
+            <div class="block-row"><span class="label">Статус сдачи:</span> <span id="st-status">—</span></div>
+            <div class="block-row"><span class="label">Дата сдачи:</span> <span id="st-submitted-at">—</span></div>
+            <div class="block-row"><span class="label">Файл ученика:</span> <span id="st-file">—</span></div>
+        </div>
+
+        <!-- Блок с результатом проверки (статус, оценка, комментарий) -->
+        <div class="block" id="block-check">
+            <div class="block-title">Результат проверки</div>
+
+            <div class="status-select-row">
+                <label for="check-status">Статус:</label>
+                <select id="check-status">
+                    <option value="pending">Не проверено</option>
+                    <option value="accepted">Принято</option>
+                    <option value="rejected">Не принято</option>
+                </select>
+
+                <label for="check-grade">Оценка:</label>
+                <input type="text" id="check-grade" placeholder="Например: 5, 4, зачёт">
+            </div>
+
+            <div class="block-row" style="margin-top: 8px;">
+                <span class="label">Дата оценивания:</span>
+                <span id="check-checked-at">—</span>
+            </div>
+
+            <div class="block-row" style="margin-top: 8px;">
+                <label for="check-comment">Комментарий учителя:</label>
+                <textarea id="check-comment" placeholder="Комментарий к работе ученика (опционально)"></textarea>
+            </div>
+        </div>
+
+        <!-- Сообщения об ошибках / результатах сохранения -->
+        <div class="page-message" id="page-message"></div>
+
+        <!-- Кнопки "Выйти" и "Сохранить" -->
+        <div class="footer-buttons">
+            <button class="btn-secondary" id="btn-exit">Выйти</button>
+            <button class="btn-primary" id="btn-save">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Мини-профиль текущего пользователя (данные берём из profile.cgi)
+    const currentUser = {
+        userId: null,
+        roleCode: "teacher",
+        fio: ""
+    };
+
+    // Идентификаторы, приходящие в URL (homework_id и student_id)
+    let currentHomeworkId = null;
+    let currentStudentId  = null;
+
+    //Разбирает строку запроса ?a=1&b=2 в объект { a: "1", b: "2" }.
+    function getQueryParams() {
+        const params = {};
+        const qs = window.location.search.substring(1);
+        qs.split("&").forEach(pair => {
+            if (!pair) return;
+            const [k, v] = pair.split("=");
+            params[decodeURIComponent(k)] = decodeURIComponent(v || "");
+        });
+        return params;
+    }
+
+    // Загрузка профиля
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId   = data.user_id || null;
+                currentUser.roleCode = data.role_code || "teacher";
+                currentUser.fio      = data.fio || "";
+
+                document.getElementById("user-role").textContent = data.role || "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio || "Иванов Иван Иванович (тест)";
+            })
+            .catch(() => {
+                // Заглушка на случай, если профайл ещё не реализован
+                currentUser.userId   = 5;
+                currentUser.roleCode = "teacher";
+                currentUser.fio      = "Иванов Иван Иванович (тест)";
+                document.getElementById("user-role").textContent = "Учитель";
+                document.getElementById("user-fio").textContent  = currentUser.fio;
+            });
+    }
+
+
+    // Загрузка данных по ДЗ/ученику
+    function loadHomeworkCheckData() {
+        const pageMessage = document.getElementById("page-message");
+
+        if (!currentHomeworkId || !currentStudentId) {
+            pageMessage.textContent = "Не переданы параметры homework_id и/или student_id в URL.";
+            return;
+        }
+
+        const params = new URLSearchParams();
+        params.append("homework_id", currentHomeworkId);
+        params.append("student_id", currentStudentId);
+
+        fetch("/cgi-bin/homework_check_data.cgi?" + params.toString())
+            .then(res => res.json())
+            .then(data => {
+                if (!data.ok) {
+                    // Сервер вернул ошибку → показываем текст
+                    pageMessage.textContent = data.message || "Ошибка загрузки данных по домашнему заданию.";
+                    return;
+                }
+                // Если всё ок — заполняем страницу
+                fillHomeworkData(data);
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если CGI пока нет
+                const dummy = {
+                    ok: true,
+                    homework: {
+                        id: currentHomeworkId,
+                        class_name: "5А",
+                        subject: "Математика",
+                        title: "Уравнения",
+                        description: "Решить №1–10 в тетради.",
+                        deadline: "2025-12-05 23:59",
+                        teacher_file_url: "/files/hw/55/task.pdf"
+                    },
+                    student: {
+                        id: currentStudentId,
+                        fio: "Петров Пётр",
+                        class_name: "5А"
+                    },
+                    submission: {
+                        status: "pending",
+                        grade: "",
+                        comment: "",
+                        submitted_at: null,
+                        checked_at: null,
+                        student_file_url: "/files/hw_submissions/123.pdf"
+                    }
+                };
+                fillHomeworkData(dummy);
+            });
+    }
+
+
+    // Подстановка данных в HTML
+    function fillHomeworkData(data) {
+        const hw  = data.homework || {};
+        const st  = data.student || {};
+        const sub = data.submission || {};
+
+        // Блок "Домашнее задание"
+        document.getElementById("hw-class").textContent    = hw.class_name || "—";
+        document.getElementById("hw-subject").textContent  = hw.subject || "—";
+        document.getElementById("hw-title").textContent    = hw.title || "—";
+        document.getElementById("hw-deadline").textContent = hw.deadline || "—";
+        document.getElementById("hw-desc").textContent     = hw.description || "—";
+
+        const hwFileEl = document.getElementById("hw-file");
+        if (hw.teacher_file_url) {
+            // Если есть файл учителя — рисуем ссылку "Скачать"
+            hwFileEl.innerHTML = "";
+            const a = document.createElement("a");
+            a.href = hw.teacher_file_url;
+            a.textContent = "Скачать";
+            a.className = "link-file";
+            a.target = "_blank";
+            hwFileEl.appendChild(a);
+        } else {
+            hwFileEl.textContent = "—";
+        }
+
+        // Блок "Ученик"
+        document.getElementById("st-fio").textContent          = st.fio || "—";
+        document.getElementById("st-class").textContent        = st.class_name || "—";
+        document.getElementById("st-status").textContent       = statusText(sub.status || "pending");
+        document.getElementById("st-submitted-at").textContent = sub.submitted_at || "—";
+
+        const stFileEl = document.getElementById("st-file");
+        if (sub.student_file_url) {
+            // Если есть файл ученика — ссылка на скачивание
+            stFileEl.innerHTML = "";
+            const a2 = document.createElement("a");
+            a2.href = sub.student_file_url;
+            a2.textContent = "Скачать работу ученика";
+            a2.className = "link-file";
+            a2.target = "_blank";
+            stFileEl.appendChild(a2);
+        } else {
+            stFileEl.textContent = "—";
+        }
+
+        // Блок "Результат проверки"
+        const statusSel = document.getElementById("check-status");
+        const gradeInp  = document.getElementById("check-grade");
+        const commentTa = document.getElementById("check-comment");
+        const checkedAt = document.getElementById("check-checked-at");
+
+        const statusVal = sub.status || "pending";
+        if (statusSel) statusSel.value = statusVal;
+        if (gradeInp)  gradeInp.value  = sub.grade || "";
+        if (commentTa) commentTa.value = sub.comment || "";
+        if (checkedAt) checkedAt.textContent = sub.checked_at || "—";
+    }
+
+    /**
+     * Перевод технического статуса ('accepted','rejected','pending')
+     * в человекочитаемый текст на русском.
+     */
+    function statusText(code) {
+        switch (code) {
+            case "accepted": return "Принято";
+            case "rejected": return "Не принято";
+            case "pending":
+            default: return "Не проверено";
+        }
+    }
+
+
+    // Сохранение результата
+    function saveCheck() {
+        const pageMessage = document.getElementById("page-message");
+        const statusSel   = document.getElementById("check-status");
+        const gradeInp    = document.getElementById("check-grade");
+        const commentTa   = document.getElementById("check-comment");
+
+        pageMessage.style.color = "#cc0000";
+        pageMessage.textContent = "";
+
+        if (!currentHomeworkId || !currentStudentId) {
+            pageMessage.textContent = "Отсутствуют homework_id или student_id.";
+            return;
+        }
+
+        const status  = statusSel ? statusSel.value : "pending";
+        const grade   = gradeInp ? gradeInp.value.trim() : "";
+        const comment = commentTa ? commentTa.value.trim() : "";
+
+        // Сбрасываем подсветку ошибок
+        gradeInp.classList.remove("field-error");
+
+        // Простая валидация: если статус "Принято", а оценки нет — подсвечиваем
+        if (status === "accepted" && !grade) {
+            gradeInp.classList.add("field-error");
+            pageMessage.textContent = "При статусе «Принято» желательно указать оценку.";
+            return;
+        }
+
+        const payload = {
+            homework_id: Number(currentHomeworkId),
+            student_id: Number(currentStudentId),
+            status,
+            grade,
+            comment
+        };
+
+        fetch("/cgi-bin/homework_check_save.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    // Успех: зелёное сообщение + обновить дату проверки
+                    pageMessage.style.color = "#007700";
+                    pageMessage.textContent = "Результат проверки сохранён.";
+                    if (data.checked_at) {
+                        const checkedAt = document.getElementById("check-checked-at");
+                        if (checkedAt) checkedAt.textContent = data.checked_at;
+                    } else {
+                        // Если CGI не вернул новое время — перезагрузим данные
+                        loadHomeworkCheckData();
+                    }
+                } else {
+                    // Сервер вернул ошибку сохранения
+                    pageMessage.style.color = "#cc0000";
+                    pageMessage.textContent = data.message || "Ошибка сохранения результата проверки.";
+                }
+            })
+            .catch(() => {
+                // ЗАГЛУШКА, если CGI ещё не реализован
+                pageMessage.style.color = "#007700";
+                pageMessage.textContent = "Результат проверки сохранён (заглушка, без CGI).";
+                const checkedAt = document.getElementById("check-checked-at");
+                if (checkedAt) checkedAt.textContent = "Только что (локально)";
+            });
+    }
+
+
+    // ВЫХОД НА СПИСОК ДЗ
+    function exitCheckPage() {
+        if (!confirm("Выйти к списку домашних заданий? Несохранённые изменения могут быть потеряны.")) {
+            return;
+        }
+        window.location.href = "all_homework.html";
+    }
+
+
+    // НАВИГАЦИЯ В ТОПБАРЕ
+    function setupNavigation() {
+        const btnHomework  = document.getElementById("nav-homework");
+        const btnMaterials = document.getElementById("nav-materials");
+        const btnNotif     = document.getElementById("nav-notifications");
+
+        if (btnHomework) {
+            btnHomework.addEventListener("click", () => {
+                window.location.href = "all_homework.html";
+            });
+        }
+
+        if (btnMaterials) {
+            btnMaterials.addEventListener("click", () => {
+                window.location.href = "material.html";
+            });
+        }
+
+        if (btnNotif) {
+            btnNotif.addEventListener("click", () => {
+                window.location.href = "notification.html";
+            });
+        }
+    }
+
+
+    document.addEventListener("DOMContentLoaded", () => {
+        const params = getQueryParams();
+        currentHomeworkId = params.homework_id || null;
+        currentStudentId  = params.student_id || null;
+
+        // Кнопки "Сохранить" и "Выйти"
+        const btnSave = document.getElementById("btn-save");
+        const btnExit = document.getElementById("btn-exit");
+
+        if (btnSave) {
+            btnSave.addEventListener("click", saveCheck);
+        }
+        if (btnExit) {
+            btnExit.addEventListener("click", exitCheckPage);
+        }
+
+        // Верхняя навигация + данные профиля + данные ДЗ
+        setupNavigation();
+        loadUserInfo();
+        loadHomeworkCheckData();
+    });
+</script>
+
+</body>
+</html>

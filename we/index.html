@@ -1,0 +1,198 @@
+<!--
+
+ Эта HTML-страница представляет собой форму авторизации пользователя.
+    Её задача — собрать логин и пароль и отправить их на сервер
+    в CGI-скрипт методом POST.
+    - На этой странице НЕТ проверки правильности логина/пароля.
+    - Вся логика авторизации (поиск пользователя в PostgreSQL,
+      проверка хэша пароля, определение роли, сохранение id/role/fio,
+      редирект на нужную страницу) выполняется на стороне CGI.
+
+Что должен делать .cgi(при необходимости поменяй название в моем файле):
+      1) Принять POST-параметры login и password.
+      2) Найти пользователя в PostgreSQL по login.
+      3) Проверить пароль.
+      4) Если неверно — вернуть HTML с ошибкой.
+      5) Если верно:
+            - получить id, fio, role пользователя,
+            - сохранить их 
+            - сделать переход на:
+                admin   /main_admin.html
+                teacher  /teacher_menu.html
+                student  /student_menu.html
+
+Напиши код для бд, закомменть его и сделай отдельно заглушку с данными простенькими, чтоб мы могли работоспобоность без 3 части проверить
+запомни роль и id, чтоб потом в бд можно было именно с этим типом работать, его расписание, оценки и тп выводить
+
+вообще если по хорошему пароли должны быть с хешированием в бд, ты принмаешь пароль и перехэшируешь его с разрешением коллизий и проверяешь в бд
+если встроенная функция есть для хэширования, то лучше используй
+если нет, то смотри сама, он может доебать
+-->
+
+<!DOCTYPE html> 
+<html lang="ru"> 
+<head>
+    <meta charset="UTF-8"> 
+    <title>Вход в систему</title> 
+
+    <style>
+        /* Общий фон и шрифт */
+        body {
+            margin: 0; 
+            padding: 0; 
+            font-family: Arial, sans-serif; 
+            background: #dae0e6; 
+        }
+
+        /* Контейнер, центрирующий карточку входа */
+        .page-wrapper {
+            width: 100%; 
+            height: 100vh; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            background: rgba(0,0,0,0.15); 
+        }
+
+        /* Карточка формы входа */
+        .login-card {
+            width: 380px; 
+            background: #ffffff; 
+            border-radius: 12px; 
+            padding: 35px 30px; 
+            box-shadow: 0 10px 25px rgba(0,0,0,0.25); 
+        }
+
+        h2 {
+            text-align: center; 
+            margin-bottom: 25px; 
+            font-size: 24px; 
+            color: #333; 
+        }
+
+        /* Подписи к полям */
+        label {
+            display: block; 
+            margin-top: 15px; 
+            font-size: 15px; 
+            font-weight: bold; 
+            color: #444; 
+        }
+
+        /* Поля ввода */
+        input[type="text"],
+        input[type="password"] {
+            width: 100%; 
+            padding: 12px; 
+            margin-top: 6px; 
+            box-sizing: border-box; 
+            border-radius: 6px; 
+            border: 1px solid #bbb; 
+            font-size: 15px; 
+            transition: 0.2s; 
+        }
+
+        /* Подсветка активного поля */
+        input:focus {
+            border-color: #cc10cc; 
+            box-shadow: 0 0 4px rgba(204,16,204,0.4); 
+            outline: none; 
+        }
+
+        /* Кнопка входа */
+        button {
+            width: 100%; 
+            margin-top: 25px; 
+            padding: 13px; 
+            background: #cc10cc; 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-size: 17px; 
+            font-weight: bold; 
+            transition: 0.2s; 
+        }
+
+        button:hover {
+            background: #770f77; 
+        }
+
+        /* Вывод ошибок проверки */
+        .error {
+            margin-top: 12px; 
+            color: #b30000; 
+            font-size: 15px; 
+            text-align: center; 
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-wrapper"> 
+    <div class="login-card"> 
+
+        <h2>Вход в систему</h2> 
+
+        <!--
+            Эта форма отправляет login/password методом POST
+            в CGI-программу /cgi-bin/login.cgi.
+            Никакой JS-логики по проверке пароля здесь нет — вся проверка на сервере.
+        -->
+        <form id="login-form" action="/cgi-bin/login.cgi" method="POST">
+
+            <!-- Поле ввода логина -->
+            <label>Логин:
+                <input type="text" name="login" id="login-input" required> 
+            </label>
+
+            <!-- Поле ввода пароля -->
+            <label>Пароль:
+                <input type="password" name="password" id="password-input" required> 
+            </label>
+
+            <!-- Место, куда выводит сообщение об ошибке -->
+            <div class="error" id="error-box"></div> 
+
+            <button type="submit" id="login-submit">Войти</button> 
+        </form>
+
+    </div>
+</div>
+
+<script>
+    /*
+        JS-блок, который срабатывает при попытке отправить форму:
+        - проверяет, что поля не пустые,
+        - НЕ проверяет логин/пароль — это делает CGI.
+        - если пустые не отправляем форму, выводим ошибку.
+    */
+
+    document.addEventListener("DOMContentLoaded", () => {
+        const form      = document.getElementById("login-form");
+        const loginInput = document.getElementById("login-input");
+        const passwordInput = document.getElementById("password-input");
+        const errorBox  = document.getElementById("error-box");
+
+        if (!form) {
+            return; 
+        }
+
+        form.addEventListener("submit", (e) => {
+            const login    = loginInput.value.trim();
+            const password = passwordInput.value.trim();
+
+            // очищаем прошлую ошибку
+            errorBox.textContent = "";
+
+            // локальная проверка на пустые поля
+            if (!login || !password) {
+                e.preventDefault(); // блокируем отправку
+                errorBox.textContent = "Введите логин и пароль.";
+            }
+        });
+    });
+</script>
+
+</body>
+</html>

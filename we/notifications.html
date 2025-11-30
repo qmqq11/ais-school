@@ -1,0 +1,995 @@
+<!--
+
+    notifications.html — страница просмотра и редактирования школьных оповещений.
+
+    Дальше будет писать CGI, но фронт уже готов:
+      • GET /cgi-bin/profile.cgi              → кто зашёл (id, роль, ФИО).
+      • GET /cgi-bin/notifications_list.cgi   → список оповещений + editable.
+      • POST /cgi-bin/notifications_save.cgi  → создать/изменить оповещение (JSON).
+      • POST /cgi-bin/notifications_delete.cgi→ удалить оповещение (JSON).
+      • GET /cgi-bin/refs.cgi?type=classes    → список классов для селекта.
+
+    В JS есть заглушки: при отсутствии CGI всё работает локально.
+
+    - Страница может открываться как администратором, так и учителем.
+    - ВСЮ ЛОГИКУ ПРАВ ДЕЛАЕТ CGI. Фронт только облегчает жизнь пользователю.
+    - Администратор:
+        * видит все оповещения
+        * может редактировать и удалять ЛЮБЫЕ оповещения
+        * при создании/редактировании может менять поле "От кого"
+    - Учитель:
+        * видит все оповещения (или только нужные — на усмотрение CGI)
+        * может РЕДАКТИРОВАТЬ/УДАЛЯТЬ ТОЛЬКО ТЕ, которые сам создал
+        * поле "От кого" всегда = его ФИО, менять нельзя
+
+   
+
+ 
+-->
+
+<!--
+
+-->
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Оповещения — Администратор</title>
+
+    <style>
+        /* Общие стили страницы */
+        body {
+            margin: 0;
+            padding: 0;
+            background: #e8e4f2;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Центральная "карточка" страницы */
+        .page-container {
+            max-width: 1100px;
+            margin: 20px auto;
+            background: #ffffffcc;
+            border-radius: 14px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+            padding-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Верхняя фиолетовая панель */
+        .topbar {
+            background: #cc10cc;
+            padding: 10px 12px;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            border-radius: 14px 14px 0 0;
+        }
+
+        .topbar-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .topbar-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .topbar-user {
+            font-size: 14px;
+        }
+
+        .topbar-user span {
+            font-weight: bold;
+        }
+
+        /* Основной контент */
+        .content {
+            padding: 20px 24px 30px 24px;
+        }
+
+        .panel-title {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #660066;
+            font-weight: bold;
+        }
+
+        /* Кнопки над таблицей */
+        .controls {
+            margin-bottom: 16px;
+        }
+
+        .controls button {
+            margin-right: 10px;
+        }
+
+        .btn-primary {
+            padding: 8px 16px;
+            background: #cc10cc;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #770f77;
+        }
+
+        .btn-secondary {
+            padding: 8px 16px;
+            background: #ffffff;
+            color: #cc10cc;
+            border: 1px solid #cc10cc;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: #f7e3f7;
+        }
+
+        .btn-danger {
+            padding: 8px 16px;
+            background: #ff4d4d;
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .btn-danger:hover {
+            background: #cc0000;
+        }
+
+        .btn-disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
+        /* Таблица оповещений */
+        .notif-wrapper {
+            margin-top: 10px;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+
+        th {
+            background: #cc10cc;
+            color: white;
+            padding: 8px;
+        }
+
+        td {
+            padding: 6px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        .selected-row td {
+            background: #ffe5ff;
+        }
+
+        .text-cell {
+            max-width: 260px;
+        }
+
+        /* Нижние кнопки страницы */
+        .footer-buttons {
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* Сообщение об ошибке/успехе */
+        .page-message {
+            margin-top: 10px;
+            min-height: 18px;
+            font-size: 13px;
+            color: #cc0000;
+        }
+
+        /* Модальное окно */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal {
+            background: #ffffff;
+            padding: 20px 24px;
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+            width: 460px;
+            max-width: 95%;
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            color: #660066;
+        }
+
+        .modal-row {
+            margin-bottom: 10px;
+        }
+
+        .modal-row label {
+            display: block;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        .modal-row input,
+        .modal-row textarea,
+        .modal-row select {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #bbb;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        .modal-row-two-cols {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .field-error {
+            border: 2px solid #ff4d4d !important;
+        }
+
+        .modal-buttons {
+            margin-top: 14px;
+            text-align: right;
+        }
+
+        .modal-error {
+            margin-top: 6px;
+            font-size: 13px;
+            color: #cc0000;
+            min-height: 18px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="page-container">
+    <!-- Верхняя панель с названием и данными пользователя -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-title">
+                Электронная школа — Оповещения
+            </div>
+            <!-- Подставляется из profile.cgi -->
+            <div class="topbar-user">
+                Роль: <span id="user-role">Администратор</span> ,
+                Пользователь: <span id="user-fio">Фамилия Имя Отчество</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="content">
+        <div class="panel-title">Оповещения школы</div>
+
+        <!-- Кнопки работы со списком -->
+        <div class="controls">
+            <button class="btn-primary" id="btn-add">Добавить оповещение</button>
+            <button class="btn-secondary btn-disabled" id="btn-edit" disabled>
+                Изменить выбранное
+            </button>
+            <button class="btn-danger btn-disabled" id="btn-delete" disabled>
+                Удалить выбранное
+            </button>
+            <button class="btn-secondary" id="btn-reload">Обновить список</button>
+        </div>
+
+        <div class="page-message" id="page-message"></div>
+
+        <!-- Таблица с оповещениями -->
+        <div class="notif-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>От кого</th>
+                        <th>Кому</th>
+                        <th>Дата и время</th>
+                        <th>Заголовок</th>
+                        <th>Текст</th>
+                    </tr>
+                </thead>
+                <tbody id="notif-body">
+                    <!-- строки добавляются JS -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="footer-buttons">
+            <button class="btn-secondary" id="btn-exit">Выйти</button>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно добавления/редактирования оповещения -->
+<div class="modal-backdrop" id="notif-modal-backdrop">
+    <div class="modal">
+        <div class="modal-title" id="notif-modal-title">Добавление оповещения</div>
+
+        <!-- id оповещения при редактировании -->
+        <input type="hidden" id="notif-id" value="">
+
+        <div class="modal-row modal-row-two-cols">
+            <div>
+                <label for="modal-from">От кого</label>
+                <input type="text" id="modal-from" placeholder="Например: Администрация школы">
+            </div>
+            <div>
+                <label for="modal-datetime">Дата и время</label>
+                <input type="datetime-local" id="modal-datetime">
+            </div>
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-title">Заголовок</label>
+            <input type="text" id="modal-title" placeholder="Тема оповещения">
+        </div>
+
+        <div class="modal-row">
+            <label for="modal-text">Текст оповещения</label>
+            <textarea id="modal-text" placeholder="Введите текст сообщения"></textarea>
+        </div>
+
+        <!-- Выбор аудитории -->
+        <div class="modal-row">
+            <label for="modal-audience-type">Кто увидит</label>
+            <select id="modal-audience-type">
+                <option value="school">Вся школа</option>
+                <option value="teachers">Все учителя</option>
+                <option value="classes">Все классы</option>
+                <option value="class">Определённый класс</option>
+                <option value="custom">Произвольная группа</option>
+            </select>
+        </div>
+
+        <!-- Для варианта "Определённый класс" -->
+        <div class="modal-row" id="modal-audience-class-row" style="display: none;">
+            <label for="modal-audience-class">Класс</label>
+            <select id="modal-audience-class">
+                <!-- заполняется из refs.cgi или заглушки -->
+            </select>
+        </div>
+
+        <!-- Для варианта "Произвольная группа" -->
+        <div class="modal-row" id="modal-audience-custom-row" style="display: none;">
+            <label for="modal-to">Кому (произвольный текст)</label>
+            <input type="text" id="modal-to" placeholder="Например: 5–7 классы, все учителя">
+        </div>
+
+        <!-- Ошибки модального окна -->
+        <div class="modal-error" id="modal-error"></div>
+
+        <div class="modal-buttons">
+            <button class="btn-secondary" id="modal-btn-cancel">Отмена</button>
+            <button class="btn-primary" id="modal-btn-ok">ОК</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    /*
+        JS-логика страницы:
+
+          • подставляет пользователя (profile.cgi) в топбар,
+          • подгружает классы (refs.cgi),
+          • подгружает список оповещений (notifications_list.cgi),
+          • открывает/закрывает модалку,
+          • проверяет права (editable, роль),
+          • сохраняет и удаляет оповещения (notifications_save/notifications_delete),
+          • имеет заглушки, если CGI ещё нет.
+    */
+
+    // Текущие оповещения и состояние выбора
+    let allNotifications = [];
+    let selectedNotificationId = null;
+    let modalMode = "add";
+
+    // Текущий пользователь (заполняется из profile.cgi)
+    const currentUser = {
+        userId: null,
+        roleCode: "admin",  // admin/teacher; по умолчанию admin в заглушке
+        fio: ""
+    };
+
+    // Справочник классов
+    const defaultRefClasses = ["5А", "5Б", "6А", "7В"];
+    let refClasses = [...defaultRefClasses];
+
+    // ---------- Загрузка пользователя в топбар ----------
+
+    function loadUserInfo() {
+        fetch("/cgi-bin/profile.cgi")
+            .then(res => res.json())
+            .then(data => {
+                currentUser.userId   = data.user_id   ?? null;
+                currentUser.roleCode = data.role_code || "admin";
+                currentUser.fio      = data.fio       || "";
+
+                document.getElementById("user-role").textContent = data.role || "Администратор";
+                document.getElementById("user-fio").textContent  = data.fio  || "Иванова Анна Алексеевна (тест)";
+            })
+            .catch(() => {
+                // Заглушка, если CGI нет
+                currentUser.userId   = 1;
+                currentUser.roleCode = "admin";
+                currentUser.fio      = "Иванова Анна Алексеевна (тест)";
+
+                document.getElementById("user-role").textContent = "Администратор";
+                document.getElementById("user-fio").textContent  = currentUser.fio;
+            });
+    }
+
+    // ---------- Загрузка справочника классов ----------
+
+    function loadRefClasses() {
+        fetch("/cgi-bin/refs.cgi?type=classes")
+            .then(res => res.json())
+            .then(data => {
+                refClasses = Array.isArray(data) ? data : [...defaultRefClasses];
+                const classSelect = document.getElementById("modal-audience-class");
+                fillSelectOptions(classSelect, refClasses, "-- выберите класс --");
+            })
+            .catch(() => {
+                refClasses = [...defaultRefClasses];
+                const classSelect = document.getElementById("modal-audience-class");
+                fillSelectOptions(classSelect, refClasses, "-- выберите класс --");
+            });
+    }
+
+    // Помощник для заполнения <select>
+    function fillSelectOptions(selectEl, values, placeholder) {
+        if (!selectEl) return;
+        selectEl.innerHTML = "";
+        const optEmpty = document.createElement("option");
+        optEmpty.value = "";
+        optEmpty.textContent = placeholder;
+        selectEl.appendChild(optEmpty);
+
+        (values || []).forEach(v => {
+            const opt = document.createElement("option");
+            opt.value = v;
+            opt.textContent = v;
+            selectEl.appendChild(opt);
+        });
+    }
+
+    // ---------- Загрузка списка оповещений ----------
+
+    function loadNotifications() {
+        const tbody = document.getElementById("notif-body");
+        const pageMessage = document.getElementById("page-message");
+
+        tbody.innerHTML = "";
+        pageMessage.textContent = "";
+        pageMessage.style.color = "#cc0000";
+
+        fetch("/cgi-bin/notifications_list.cgi")
+            .then(res => res.json())
+            .then(data => {
+                const list = Array.isArray(data) ? data : (data.notifications || []);
+                allNotifications = list;
+                renderNotificationsTable();
+            })
+            .catch(() => {
+                // Заглушка при отсутствии CGI
+                allNotifications = [
+                    {
+                        id: 1,
+                        from: "Администрация школы",
+                        to: "Вся школа",
+                        datetime: "2025-09-01 09:00",
+                        title: "Линейка 1 сентября",
+                        text: "Приглашаем всех на торжественную линейку.",
+                        audience_type: "school",
+                        audience_value: "",
+                        created_by: 1,
+                        editable: true
+                    },
+                    {
+                        id: 2,
+                        from: "Иванов И.И.",
+                        to: "Класс 7Б",
+                        datetime: "2025-09-02 15:00",
+                        title: "Классное собрание",
+                        text: "Просим родителей прийти в кабинет 203.",
+                        audience_type: "class",
+                        audience_value: "7Б",
+                        created_by: 2,
+                        editable: false
+                    }
+                ];
+                renderNotificationsTable();
+            });
+    }
+
+    // ---------- Рендер таблицы ----------
+
+    function renderNotificationsTable() {
+        const tbody = document.getElementById("notif-body");
+        tbody.innerHTML = "";
+
+        if (!allNotifications.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 5;
+            td.textContent = "Оповещения отсутствуют.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            selectedNotificationId = null;
+            updateSelectionHighlight();
+            updateRowButtonsState();
+            return;
+        }
+
+        allNotifications.forEach(item => {
+            const tr = document.createElement("tr");
+            tr.dataset.id       = item.id;
+            tr.dataset.editable = item.editable ? "1" : "0";
+
+            const tdFrom = document.createElement("td");
+            tdFrom.textContent = item.from || "";
+            tr.appendChild(tdFrom);
+
+            const tdTo = document.createElement("td");
+            tdTo.textContent = item.to || "";
+            tr.appendChild(tdTo);
+
+            const tdDatetime = document.createElement("td");
+            tdDatetime.textContent = item.datetime || "";
+            tr.appendChild(tdDatetime);
+
+            const tdTitle = document.createElement("td");
+            tdTitle.textContent = item.title || "";
+            tr.appendChild(tdTitle);
+
+            const tdText = document.createElement("td");
+            tdText.className = "text-cell";
+            tdText.textContent = item.text || "";
+            tr.appendChild(tdText);
+
+            tr.addEventListener("click", () => {
+                selectedNotificationId = item.id;
+                updateSelectionHighlight();
+                updateRowButtonsState();
+            });
+
+            tbody.appendChild(tr);
+        });
+
+        updateSelectionHighlight();
+        updateRowButtonsState();
+    }
+
+    // Подсветка выбранной строки
+    function updateSelectionHighlight() {
+        const rows = document.querySelectorAll("#notif-body tr");
+        rows.forEach(tr => {
+            const id = tr.dataset.id ? Number(tr.dataset.id) : null;
+            if (id === selectedNotificationId) {
+                tr.classList.add("selected-row");
+            } else {
+                tr.classList.remove("selected-row");
+            }
+        });
+    }
+
+    // Включение/отключение кнопок "Изменить" / "Удалить"
+    function updateRowButtonsState() {
+        const btnEdit   = document.getElementById("btn-edit");
+        const btnDelete = document.getElementById("btn-delete");
+
+        let hasSelection = selectedNotificationId !== null;
+        let canEdit = false;
+
+        if (hasSelection) {
+            const notif = allNotifications.find(n => n.id === selectedNotificationId);
+            if (notif) {
+                if (currentUser.roleCode === "admin") {
+                    canEdit = true;
+                } else {
+                    if (notif.editable === true || notif.editable === 1 || notif.editable === "1") {
+                        canEdit = true;
+                    } else if (currentUser.userId != null && notif.created_by === currentUser.userId) {
+                        canEdit = true;
+                    }
+                }
+            } else {
+                hasSelection = false;
+            }
+        }
+
+        if (hasSelection && canEdit) {
+            btnEdit.disabled   = false;
+            btnDelete.disabled = false;
+            btnEdit.classList.remove("btn-disabled");
+            btnDelete.classList.remove("btn-disabled");
+        } else {
+            btnEdit.disabled   = true;
+            btnDelete.disabled = true;
+            btnEdit.classList.add("btn-disabled");
+            btnDelete.classList.add("btn-disabled");
+        }
+    }
+
+    // ---------- Управление полями аудитории ----------
+
+    function updateAudienceVisibility() {
+        const audienceTypeSelect = document.getElementById("modal-audience-type");
+        const classRow           = document.getElementById("modal-audience-class-row");
+        const customRow          = document.getElementById("modal-audience-custom-row");
+
+        if (!audienceTypeSelect || !classRow || !customRow) return;
+
+        const t = audienceTypeSelect.value;
+
+        classRow.style.display  = (t === "class")  ? "block" : "none";
+        customRow.style.display = (t === "custom") ? "block" : "none";
+    }
+
+    function setupAudienceControls() {
+        const audienceTypeSelect = document.getElementById("modal-audience-type");
+        if (!audienceTypeSelect) return;
+
+        audienceTypeSelect.addEventListener("change", updateAudienceVisibility);
+        updateAudienceVisibility();
+    }
+
+    // ---------- Открытие/закрытие модалки ----------
+
+    function openNotifModal(mode, notification) {
+        modalMode = mode;
+
+        const modalTitle  = document.getElementById("notif-modal-title");
+        const idField     = document.getElementById("notif-id");
+        const fromField   = document.getElementById("modal-from");
+        const datetimeFld = document.getElementById("modal-datetime");
+        const titleField  = document.getElementById("modal-title");
+        const textField   = document.getElementById("modal-text");
+        const errorBox    = document.getElementById("modal-error");
+
+        const audienceTypeSelect = document.getElementById("modal-audience-type");
+        const classSelect        = document.getElementById("modal-audience-class");
+        const toField            = document.getElementById("modal-to");
+
+        errorBox.textContent = "";
+        [fromField, datetimeFld, titleField, textField, audienceTypeSelect, classSelect, toField].forEach(el => {
+            if (el) el.classList.remove("field-error");
+        });
+
+        if (mode === "add") {
+            modalTitle.textContent = "Добавление оповещения";
+            idField.value          = "";
+            datetimeFld.value      = "";
+            titleField.value       = "";
+            textField.value        = "";
+
+            if (currentUser.roleCode === "admin") {
+                fromField.readOnly = false;
+                fromField.value    = currentUser.fio || "";
+            } else {
+                fromField.readOnly = true;
+                fromField.value    = currentUser.fio || "";
+            }
+
+            if (audienceTypeSelect) audienceTypeSelect.value = "school";
+            if (classSelect) classSelect.value = "";
+            if (toField) toField.value = "";
+        } else if (mode === "edit" && notification) {
+            modalTitle.textContent = "Редактирование оповещения";
+            idField.value          = notification.id || "";
+            datetimeFld.value      = notification.datetime || "";
+            titleField.value       = notification.title || "";
+            textField.value        = notification.text || "";
+
+            if (currentUser.roleCode === "admin") {
+                fromField.readOnly = false;
+                fromField.value    = notification.from || currentUser.fio || "";
+            } else {
+                fromField.readOnly = true;
+                fromField.value    = notification.from || currentUser.fio || "";
+            }
+
+            const aType = notification.audience_type || (notification.to ? "custom" : "school");
+            const aVal  = notification.audience_value || "";
+
+            if (audienceTypeSelect) audienceTypeSelect.value = aType;
+            if (classSelect) classSelect.value = (aType === "class" ? aVal : "");
+            if (toField) {
+                toField.value = (aType === "custom") ? (notification.to || "") : "";
+            }
+        }
+
+        updateAudienceVisibility();
+        document.getElementById("notif-modal-backdrop").style.display = "flex";
+    }
+
+    function closeNotifModal() {
+        document.getElementById("notif-modal-backdrop").style.display = "none";
+    }
+
+    // ---------- ОК в модалке: валидация и подготовка JSON ----------
+
+    function handleNotifModalOk() {
+        const idField     = document.getElementById("notif-id");
+        const fromField   = document.getElementById("modal-from");
+        const datetimeFld = document.getElementById("modal-datetime");
+        const titleField  = document.getElementById("modal-title");
+        const textField   = document.getElementById("modal-text");
+        const errorBox    = document.getElementById("modal-error");
+        const pageMessage = document.getElementById("page-message");
+
+        const audienceTypeSelect = document.getElementById("modal-audience-type");
+        const classSelect        = document.getElementById("modal-audience-class");
+        const toField            = document.getElementById("modal-to");
+
+        errorBox.textContent = "";
+        pageMessage.textContent = "";
+        pageMessage.style.color = "#cc0000";
+
+        [fromField, datetimeFld, titleField, textField, audienceTypeSelect, classSelect, toField].forEach(el => {
+            if (el) el.classList.remove("field-error");
+        });
+
+        const id       = idField.value ? Number(idField.value) : 0;
+        const datetime = datetimeFld.value.trim();
+        const title    = titleField.value.trim();
+        const text     = textField.value.trim();
+
+        let hasError = false;
+
+        if (!title) {
+            titleField.classList.add("field-error");
+            hasError = true;
+        }
+        if (!text) {
+            textField.classList.add("field-error");
+            hasError = true;
+        }
+
+        if (hasError) {
+            errorBox.textContent = "Заполните обязательные поля (заголовок и текст).";
+            return;
+        }
+
+        // from: учитель — всегда своё ФИО; админ может менять
+        let from;
+        if (currentUser.roleCode === "admin") {
+            from = (fromField.value || "").trim() || currentUser.fio || "";
+        } else {
+            from = currentUser.fio || "";
+        }
+
+        // Аудитория
+        const audience_type = audienceTypeSelect ? audienceTypeSelect.value : "school";
+        let audience_value  = "";
+        let to_text         = "";
+
+        if (audience_type === "class") {
+            audience_value = classSelect ? classSelect.value.trim() : "";
+            if (!audience_value) {
+                if (classSelect) classSelect.classList.add("field-error");
+                errorBox.textContent = "Выберите класс.";
+                return;
+            }
+            to_text = "Класс " + audience_value;
+        } else if (audience_type === "school") {
+            to_text = "Вся школа";
+        } else if (audience_type === "teachers") {
+            to_text = "Все учителя";
+        } else if (audience_type === "classes") {
+            to_text = "Все классы";
+        } else if (audience_type === "custom") {
+            to_text = toField ? toField.value.trim() : "";
+            if (!to_text) {
+                if (toField) toField.classList.add("field-error");
+                errorBox.textContent = "Укажите получателей.";
+                return;
+            }
+        }
+
+        const notifPayload = {
+            id,
+            from,
+            datetime,
+            title,
+            text,
+            audience_type,
+            audience_value,
+            to: to_text
+        };
+
+        saveNotification(notifPayload);
+    }
+
+    // ---------- Сохранение через notifications_save.cgi ----------
+
+    function saveNotification(notification) {
+        const errorBox    = document.getElementById("modal-error");
+        const pageMessage = document.getElementById("page-message");
+
+        fetch("/cgi-bin/notifications_save.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(notification)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Оповещение сохранено.");
+                    closeNotifModal();
+                    loadNotifications();
+                    pageMessage.style.color = "#007700";
+                    pageMessage.textContent = "Оповещение успешно сохранено.";
+                } else {
+                    errorBox.textContent = data.message || "Ошибка сохранения оповещения на сервере.";
+                }
+            })
+            .catch(() => {
+                // Заглушка — считаем, что всё прошло
+                alert("Сохранение (заглушка): считаем, что всё успешно.");
+                closeNotifModal();
+
+                if (notification.id > 0) {
+                    allNotifications = allNotifications.map(n =>
+                        n.id === notification.id ? { ...notification, editable: true } : n
+                    );
+                } else {
+                    const maxId = allNotifications.reduce((m, n) => Math.max(m, n.id || 0), 0);
+                    const newId = maxId + 1;
+                    allNotifications.push({ ...notification, id: newId, editable: true });
+                }
+                renderNotificationsTable();
+                pageMessage.style.color = "#007700";
+                pageMessage.textContent = "Оповещение сохранено (локально, без CGI).";
+            });
+    }
+
+    // ---------- Удаление оповещения ----------
+
+    function deleteSelectedNotification() {
+        const pageMessage = document.getElementById("page-message");
+        if (selectedNotificationId == null) return;
+
+        if (!confirm("Удалить выбранное оповещение?")) return;
+
+        const payload = { id: selectedNotificationId };
+
+        fetch("/cgi-bin/notifications_delete.cgi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.ok) {
+                    alert("Оповещение удалено.");
+                    selectedNotificationId = null;
+                    loadNotifications();
+                    pageMessage.style.color = "#007700";
+                    pageMessage.textContent = "Оповещение успешно удалено.";
+                } else {
+                    pageMessage.style.color = "#cc0000";
+                    pageMessage.textContent = data.message || "Ошибка удаления оповещения на сервере.";
+                }
+            })
+            .catch(() => {
+                // Заглушка — удаляем локально
+                alert("Удаление (заглушка): считаем, что всё успешно.");
+                allNotifications = allNotifications.filter(n => n.id !== selectedNotificationId);
+                selectedNotificationId = null;
+                renderNotificationsTable();
+                pageMessage.style.color = "#007700";
+                pageMessage.textContent = "Оповещение удалено (локально, без CGI).";
+            });
+    }
+
+    // ---------- Выход с страницы ----------
+
+    function exitNotificationsPage() {
+        if (!confirm("Выйти на главную страницу администратора? Несохранённые изменения могут быть потеряны.")) {
+            return;
+        }
+        window.location.href = "main_admin.html";
+    }
+
+    // ---------- Инициализация ----------
+
+    document.addEventListener("DOMContentLoaded", () => {
+        const btnAdd       = document.getElementById("btn-add");
+        const btnEdit      = document.getElementById("btn-edit");
+        const btnDelete    = document.getElementById("btn-delete");
+        const btnReload    = document.getElementById("btn-reload");
+        const btnExit      = document.getElementById("btn-exit");
+
+        const modalBackdrop  = document.getElementById("notif-modal-backdrop");
+        const modalBtnOk     = document.getElementById("modal-btn-ok");
+        const modalBtnCancel = document.getElementById("modal-btn-cancel");
+
+        if (btnAdd) {
+            btnAdd.addEventListener("click", () => openNotifModal("add", null));
+        }
+
+        if (btnEdit) {
+            btnEdit.addEventListener("click", () => {
+                const notif = allNotifications.find(n => n.id === selectedNotificationId);
+                if (!notif) return;
+                openNotifModal("edit", notif);
+            });
+        }
+
+        if (btnDelete) {
+            btnDelete.addEventListener("click", deleteSelectedNotification);
+        }
+
+        if (btnReload) {
+            btnReload.addEventListener("click", loadNotifications);
+        }
+
+        if (btnExit) {
+            btnExit.addEventListener("click", exitNotificationsPage);
+        }
+
+        if (modalBtnOk) {
+            modalBtnOk.addEventListener("click", handleNotifModalOk);
+        }
+
+        if (modalBtnCancel) {
+            modalBtnCancel.addEventListener("click", closeNotifModal);
+        }
+
+        if (modalBackdrop) {
+            modalBackdrop.addEventListener("click", (e) => {
+                if (e.target === modalBackdrop) {
+                    closeNotifModal();
+                }
+            });
+        }
+
+        loadUserInfo();
+        loadRefClasses();
+        setupAudienceControls();
+        loadNotifications();
+    });
+</script>
+
+</body>
+</html>
